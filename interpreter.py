@@ -44,9 +44,22 @@ class SimpleAssembler:
         Возвращает кортеж (тип, значение):
         - ('reg', номер_регистра) для R0-R7
         - ('imm', число) для констант (только положительные десятичные)
+        - ('mem', адрес) для [адрес]
         - ('label', имя_метки) для меток
         """
         token = token.upper()
+        
+        # Проверка на память [адрес]
+        if token.startswith('[') and token.endswith(']'):
+            addr_token = token[1:-1]  # убираем скобки
+            if addr_token.isdigit():
+                addr = int(addr_token)
+                if 0 <= addr <= 255:
+                    return ('mem', addr)
+                else:
+                    raise ValueError(f"Адрес памяти {addr} вне диапазона (0-255)")
+            else:
+                raise ValueError(f"Неверный адрес памяти: {addr_token}")
         
         # Проверка на регистр (только R0-R7)
         if token.startswith('R') and len(token) == 2:  # Только R0..R7
@@ -62,11 +75,11 @@ class SimpleAssembler:
             
             # Проверка на 16-битное беззнаковое число
             if 0 <= value <= 65535:
-                return ('imm', value)  # Дополнительный код для положительных = само число
+                return ('imm', value)
             else:
                 raise ValueError(f"Число {value} выходит за пределы 16 бит (0-65535)")
         
-        # Если не регистр и не число, считаем меткой
+        # Если не регистр, не число и не память, считаем меткой
         if token and token[0].isalpha():
             return ('label', token)
         else:
@@ -111,10 +124,8 @@ class SimpleAssembler:
                         try:
                             op_type, op_val = self.parse_operand(parts[1])
                             if op_type != 'label':
-                                # Если операнд распарсился как регистр или число - ошибка
                                 print(f"Ошибка (строка {i}): JMP требует метку, получен {parts[1]}")
                                 error_count += 1
-                            # Для JMP не проверяем существование метки сейчас - это будет в execute
                         except ValueError as e:
                             print(f"Ошибка (строка {i}): {e}")
                             error_count += 1
@@ -125,15 +136,27 @@ class SimpleAssembler:
                         error_count += 1
                     else:
                         try:
-                            # Проверяем первый операнд (должен быть регистром)
+                            # Проверяем оба операнда
                             dest_type, dest_val = self.parse_operand(parts[1])
-                            if dest_type != 'reg':
-                                print(f"Ошибка (строка {i}): Первый операнд MOV должен быть регистром")
+                            src_type, src_val = self.parse_operand(parts[2])
+                            
+                            # Проверка допустимых комбинаций:
+                            # 1. регистр <- регистр/число
+                            # 2. память <- регистр
+                            # 3. регистр <- память
+                            
+                            if dest_type == 'reg':
+                                if src_type not in ['reg', 'imm', 'mem']:
+                                    print(f"Ошибка (строка {i}): Недопустимый источник для регистра")
+                                    error_count += 1
+                            elif dest_type == 'mem':
+                                if src_type != 'reg':
+                                    print(f"Ошибка (строка {i}): В память можно сохранять только из регистра")
+                                    error_count += 1
+                            else:
+                                print(f"Ошибка (строка {i}): Недопустимый приемник MOV")
                                 error_count += 1
-                            
-                            # Проверяем второй операнд
-                            self.parse_operand(parts[2])
-                            
+                                
                         except ValueError as e:
                             print(f"Ошибка (строка {i}): {e}")
                             error_count += 1
@@ -213,20 +236,29 @@ class SimpleAssembler:
                     dest_type, dest_val = self.parse_operand(operands[0])
                     src_type, src_val = self.parse_operand(operands[1])
                     
-                    if dest_type != 'reg':
-                        raise ValueError("Первый операнд MOV должен быть регистром")
+                    # Выполняем MOV в зависимости от типов
+                    if dest_type == 'reg' and src_type == 'reg':
+                        # регистр <- регистр
+                        self.registers[dest_val] = self.registers[src_val]
+                        print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]})")
                     
-                    # Получаем значение источника
-                    if src_type == 'reg':
-                        value = self.registers[src_val]
-                    elif src_type == 'imm':
-                        value = src_val
-                    else:  # label
-                        raise ValueError("MOV не может использовать метку как источник")
+                    elif dest_type == 'reg' and src_type == 'imm':
+                        # регистр <- число
+                        self.registers[dest_val] = src_val
+                        print(f"  MOV R{dest_val} <- {src_val}")
                     
-                    # Сохраняем в регистр назначения
-                    self.registers[dest_val] = value
-                    print(f"  MOV R{dest_val} <- {value} (0x{value:04X})")
+                    elif dest_type == 'reg' and src_type == 'mem':
+                        # регистр <- память
+                        self.registers[dest_val] = self.memory[src_val]
+                        print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]})")
+                    
+                    elif dest_type == 'mem' and src_type == 'reg':
+                        # память <- регистр
+                        self.memory[dest_val] = self.registers[src_val]
+                        print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]})")
+                    
+                    else:
+                        raise ValueError(f"Недопустимая комбинация операндов MOV: {dest_type} <- {src_type}")
                 
                 else:
                     raise ValueError(f"Неизвестная команда '{instr}'")
@@ -285,7 +317,7 @@ class SimpleAssembler:
                 if i + j < 8:
                     reg_line += f"R{i+j}: {self.registers[i+j]:5} (0x{self.registers[i+j]:04X})  "
             print(reg_line)
-        print(f"Память (первые 10 ячеек): {[f'{x:04X}' for x in self.memory[:10]]}")
+        print(f"Память (первые 10 ячеек): {[self.memory[i] for i in range(10)]}")
         print(f"Метки: {self.labels}")
 
 
