@@ -1,6 +1,5 @@
 import sys
-import re
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Union
 
 class SimpleAssembler:
     """Простой интерпретатор псевдо-ассемблера"""
@@ -8,6 +7,7 @@ class SimpleAssembler:
     def __init__(self):
         # Состояние вычислительной системы
         self.pc = 0  # Счетчик команд
+        self.registers = [0] * 8  # 8 регистров R0-R7
         self.memory = [0] * 256  # Память данных (256 ячеек)
         self.running = False  # Флаг выполнения программы
         
@@ -17,7 +17,7 @@ class SimpleAssembler:
         self.labels = {}  # Метки: {имя_метки: адрес}
         
         # Таблица допустимых команд
-        self.valid_instructions = {'HLT', 'NOP', 'JMP'}
+        self.valid_instructions = {'HLT', 'NOP', 'JMP', 'MOV'}
     
     def load_program(self, filename: str) -> bool:
         """Загрузка программы из файла"""
@@ -34,10 +34,43 @@ class SimpleAssembler:
     
     def remove_comments(self, line: str) -> str:
         """Удаление комментариев из строки"""
-        # Комментарии начинаются с '#'
         if '#' in line:
             line = line[:line.index('#')]
         return line.strip()
+    
+    def parse_operand(self, token: str) -> Tuple[str, Union[int, str]]:
+        """
+        Парсинг операнда.
+        Возвращает кортеж (тип, значение):
+        - ('reg', номер_регистра) для R0-R7
+        - ('imm', число) для констант (только положительные десятичные)
+        - ('label', имя_метки) для меток
+        """
+        token = token.upper()
+        
+        # Проверка на регистр (только R0-R7)
+        if token.startswith('R') and len(token) == 2:  # Только R0..R7
+            if token[1].isdigit():
+                reg_num = int(token[1])
+                if 0 <= reg_num <= 7:
+                    return ('reg', reg_num)
+                # R8, R9 - метки (продолжаем проверку)
+        
+        # Проверка на число (только положительные десятичные)
+        if token.isdigit():  # Только цифры, без минуса
+            value = int(token)
+            
+            # Проверка на 16-битное беззнаковое число
+            if 0 <= value <= 65535:
+                return ('imm', value)  # Дополнительный код для положительных = само число
+            else:
+                raise ValueError(f"Число {value} выходит за пределы 16 бит (0-65535)")
+        
+        # Если не регистр и не число, считаем меткой
+        if token and token[0].isalpha():
+            return ('label', token)
+        else:
+            raise ValueError(f"Неверный операнд: {token}")
     
     def first_pass(self) -> bool:
         """Первый проход: сбор меток и проверка синтаксиса"""
@@ -45,17 +78,15 @@ class SimpleAssembler:
         error_count = 0
         
         for i, raw_line in enumerate(self.lines, 1):
-            # Удаляем комментарии и лишние пробелы
             line = self.remove_comments(raw_line)
-            if not line:  # Пустая строка
+            if not line:
                 continue
             
-            # Разделитель - пробел
             parts = line.split()
             
-            # Проверяем, является ли первый элемент меткой
+            # Проверка на метку
             if parts[0].endswith(':'):
-                label = parts[0][:-1]  # Убираем двоеточие
+                label = parts[0][:-1]
                 
                 if label in self.labels:
                     print(f"Ошибка (строка {i}): Метка '{label}' уже определена")
@@ -63,15 +94,50 @@ class SimpleAssembler:
                 else:
                     self.labels[label] = address
                 
-                # Игнорируем всё после метки на этой строке
-                # Инструкция должна быть на следующей строке
+                # Игнорируем всё после метки
                 continue
             else:
-                # Обычная инструкция
                 instr = parts[0]
                 if instr not in self.valid_instructions:
                     print(f"Ошибка (строка {i}): Неизвестная команда '{instr}'")
                     error_count += 1
+                
+                # Проверка синтаксиса команд
+                if instr == 'JMP':
+                    if len(parts) != 2:
+                        print(f"Ошибка (строка {i}): JMP требует 1 операнд (метку)")
+                        error_count += 1
+                    else:
+                        try:
+                            op_type, op_val = self.parse_operand(parts[1])
+                            if op_type != 'label':
+                                # Если операнд распарсился как регистр или число - ошибка
+                                print(f"Ошибка (строка {i}): JMP требует метку, получен {parts[1]}")
+                                error_count += 1
+                            # Для JMP не проверяем существование метки сейчас - это будет в execute
+                        except ValueError as e:
+                            print(f"Ошибка (строка {i}): {e}")
+                            error_count += 1
+                
+                elif instr == 'MOV':
+                    if len(parts) != 3:
+                        print(f"Ошибка (строка {i}): MOV требует 2 операнда")
+                        error_count += 1
+                    else:
+                        try:
+                            # Проверяем первый операнд (должен быть регистром)
+                            dest_type, dest_val = self.parse_operand(parts[1])
+                            if dest_type != 'reg':
+                                print(f"Ошибка (строка {i}): Первый операнд MOV должен быть регистром")
+                                error_count += 1
+                            
+                            # Проверяем второй операнд
+                            self.parse_operand(parts[2])
+                            
+                        except ValueError as e:
+                            print(f"Ошибка (строка {i}): {e}")
+                            error_count += 1
+                
                 address += 1
         
         return error_count == 0
@@ -88,10 +154,11 @@ class SimpleAssembler:
             
             parts = line.split()
             
-            # Пропускаем строки с метками (инструкция на следующей строке)
+            # Пропускаем строки с метками
             if parts[0].endswith(':'):
                 continue
             else:
+                # Сохраняем инструкцию с операндами как есть
                 self.instructions.append((address, parts[0], parts[1:]))
                 address += 1
         
@@ -106,7 +173,7 @@ class SimpleAssembler:
         self.pc = 0
         self.running = True
         executed_count = 0
-        max_executions = 1000  # Защита от зацикливания
+        max_executions = 1000
         
         while self.running and executed_count < max_executions:
             if self.pc >= len(self.instructions):
@@ -115,33 +182,59 @@ class SimpleAssembler:
             
             addr, instr, operands = self.instructions[self.pc]
             
-            # Выполняем команду
-            if instr == 'HLT':
-                print("Программа завершена (HLT)")
-                self.running = False
-            elif instr == 'NOP':
-                # Пустая операция
-                pass
-            elif instr == 'JMP':
-                if len(operands) != 1:
-                    print(f"Ошибка: JMP требует 1 операнд (метку)")
+            try:
+                if instr == 'HLT':
+                    print("Программа завершена (HLT)")
                     self.running = False
-                    break
                 
-                label = operands[0]
-                if label not in self.labels:
-                    print(f"Ошибка: Метка '{label}' не найдена")
-                    self.running = False
-                    break
+                elif instr == 'NOP':
+                    pass
                 
-                # Безусловный переход
-                self.pc = self.labels[label]
-                print(f"  JMP -> {label} (адрес {self.pc})")
-                continue  # Продолжаем без увеличения PC
-            else:
-                # Эта ситуация не должна возникнуть после проверок
-                print(f"Ошибка выполнения: неизвестная команда '{instr}'. Что-то пошло не по плану")
+                elif instr == 'JMP':
+                    if len(operands) != 1:
+                        raise ValueError("JMP требует 1 операнд")
+                    
+                    op_type, label = self.parse_operand(operands[0])
+                    if op_type != 'label':
+                        raise ValueError(f"JMP требует метку, получен {operands[0]}")
+                    
+                    if label not in self.labels:
+                        raise ValueError(f"Метка '{label}' не найдена")
+                    
+                    self.pc = self.labels[label]
+                    print(f"  JMP -> {label} (адрес {self.pc})")
+                    continue
+                
+                elif instr == 'MOV':
+                    if len(operands) != 2:
+                        raise ValueError("MOV требует 2 операнда")
+                    
+                    # Парсим операнды
+                    dest_type, dest_val = self.parse_operand(operands[0])
+                    src_type, src_val = self.parse_operand(operands[1])
+                    
+                    if dest_type != 'reg':
+                        raise ValueError("Первый операнд MOV должен быть регистром")
+                    
+                    # Получаем значение источника
+                    if src_type == 'reg':
+                        value = self.registers[src_val]
+                    elif src_type == 'imm':
+                        value = src_val
+                    else:  # label
+                        raise ValueError("MOV не может использовать метку как источник")
+                    
+                    # Сохраняем в регистр назначения
+                    self.registers[dest_val] = value
+                    print(f"  MOV R{dest_val} <- {value} (0x{value:04X})")
+                
+                else:
+                    raise ValueError(f"Неизвестная команда '{instr}'")
+            
+            except (ValueError, IndexError) as e:
+                print(f"Ошибка выполнения (адрес {addr}): {e}")
                 self.running = False
+                break
             
             self.pc += 1
             executed_count += 1
@@ -156,13 +249,11 @@ class SimpleAssembler:
         """Полный цикл: загрузка, компиляция и выполнение"""
         print(f"Загрузка программы из файла: {filename}")
         
-        # Шаг 1: Загрузка программы
         if not self.load_program(filename):
             return False
         
         print(f"Загружено строк: {len(self.lines)}")
         
-        # Шаг 2: Первый проход (сбор меток и проверка команд)
         print("Первый проход: сбор меток и проверка синтаксиса...")
         if not self.first_pass():
             print("Ошибка компиляции: обнаружены синтаксические ошибки")
@@ -170,7 +261,6 @@ class SimpleAssembler:
         
         print(f"Найдено меток: {len(self.labels)}")
         
-        # Шаг 3: Второй проход (формирование внутреннего представления)
         print("Второй проход: формирование внутреннего представления...")
         if not self.second_pass():
             print("Ошибка при формировании внутреннего представления")
@@ -178,7 +268,6 @@ class SimpleAssembler:
         
         print(f"Сформировано инструкций: {len(self.instructions)}")
         
-        # Шаг 4: Выполнение программы
         print("\n--- Начало выполнения ---")
         result = self.execute()
         print("--- Конец выполнения ---")
@@ -189,7 +278,14 @@ class SimpleAssembler:
         """Отладочный вывод состояния"""
         print(f"\n--- Состояние ---")
         print(f"PC: {self.pc}")
-        print(f"Память (первые 10 ячеек): {self.memory[:10]}")
+        print("Регистры:")
+        for i in range(0, 8, 4):
+            reg_line = ""
+            for j in range(4):
+                if i + j < 8:
+                    reg_line += f"R{i+j}: {self.registers[i+j]:5} (0x{self.registers[i+j]:04X})  "
+            print(reg_line)
+        print(f"Память (первые 10 ячеек): {[f'{x:04X}' for x in self.memory[:10]]}")
         print(f"Метки: {self.labels}")
 
 
@@ -202,7 +298,6 @@ def main():
     
     filename = sys.argv[1]
     
-    # Создаем и запускаем интерпретатор
     asm = SimpleAssembler()
     success = asm.run(filename)
     
