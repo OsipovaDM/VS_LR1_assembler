@@ -50,7 +50,7 @@ class SimpleAssembler:
             if not line:  # Пустая строка
                 continue
             
-            # Разделитель - пробел???
+            # Разделитель - пробел
             parts = line.split()
             
             # Проверяем, является ли первый элемент меткой
@@ -63,15 +63,11 @@ class SimpleAssembler:
                 else:
                     self.labels[label] = address
                 
-                # Если после метки есть инструкция (только одна инструкция после метки???)
-                if len(parts) > 1:
-                    instr = parts[1]
-                    if instr not in self.valid_instructions:
-                        print(f"Ошибка (строка {i}): Неизвестная команда '{instr}'")
-                        error_count += 1
-                    address += 1
+                # Игнорируем всё после метки на этой строке
+                # Инструкция должна быть на следующей строке
+                continue
             else:
-                # Обычная инструкция (тавталогия, но да бог с ней)
+                # Обычная инструкция
                 instr = parts[0]
                 if instr not in self.valid_instructions:
                     print(f"Ошибка (строка {i}): Неизвестная команда '{instr}'")
@@ -92,11 +88,9 @@ class SimpleAssembler:
             
             parts = line.split()
             
-            # Пропускаем метки
+            # Пропускаем строки с метками (инструкция на следующей строке)
             if parts[0].endswith(':'):
-                if len(parts) > 1:
-                    self.instructions.append((address, parts[1], parts[2:]))
-                    address += 1
+                continue
             else:
                 self.instructions.append((address, parts[0], parts[1:]))
                 address += 1
@@ -143,6 +137,7 @@ class SimpleAssembler:
                 # Безусловный переход
                 self.pc = self.labels[label]
                 print(f"  JMP -> {label} (адрес {self.pc})")
+                continue  # Продолжаем без увеличения PC
             else:
                 # Эта ситуация не должна возникнуть после проверок
                 print(f"Ошибка выполнения: неизвестная команда '{instr}'. Что-то пошло не по плану")
@@ -152,7 +147,7 @@ class SimpleAssembler:
             executed_count += 1
         
         if executed_count >= max_executions:
-            print("Ошибка: Превышен лимит выполнения (возможено зацикливание)")
+            print("Ошибка: Превышен лимит выполнения (возможно зацикливание)")
             return False
         
         return True
