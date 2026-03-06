@@ -165,7 +165,7 @@ class SimpleAssembler:
                         except ValueError as e:
                             print(f"Ошибка (строка {i}): {e}")
                             error_count += 1
-                
+
                 elif instr == 'CMP':
                     if len(parts) != 3:
                         print(f"Ошибка (строка {i}): CMP требует 2 операнда (регистры)")
@@ -317,7 +317,7 @@ class SimpleAssembler:
                     if dest_type == 'reg' and src_type == 'reg':
                         # регистр <- регистр
                         self.registers[dest_val] = self.registers[src_val]
-                        print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]})")
+                        print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]}) ")
 
                     elif dest_type == 'reg' and src_type == 'imm':
                         # регистр <- число
@@ -327,12 +327,12 @@ class SimpleAssembler:
                     elif dest_type == 'reg' and src_type == 'mem':
                         # регистр <- память
                         self.registers[dest_val] = self.memory[src_val]
-                        print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]})")
+                        print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]}) ")
 
                     elif dest_type == 'mem' and src_type == 'reg':
                         # память <- регистр
                         self.memory[dest_val] = self.registers[src_val]
-                        print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]})")
+                        print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]}) ")
 
                     else:
                         raise ValueError(f"Недопустимая комбинация операндов MOV: {dest_type} <- {src_type}")
@@ -382,27 +382,33 @@ class SimpleAssembler:
 
                     if instr == 'ADD':
                         full_result = val1 + val2
-                        result = full_result & 0xFFFF
-                        if full_result > 0xFFFF:
-                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result} (переполнение, сохранено {result})")
+                        if full_result > 0xFFFF: # Overflow check
+                            self.z_flag_flag = True
+                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
                         else:
-                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {result}")
+                            self.z_flag = False
+                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result}")
+                        result = full_result & 0xFFFF
 
                     elif instr == 'SUB':
                         full_result = val1 - val2
-                        result = full_result & 0xFFFF
-                        if full_result < 0:
-                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result} (отрицательное, сохранено {result} в доп. коде)")
+                        if full_result < 0: # Underflow in unsigned arithmetic
+                            self.z_flag = True
+                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result} (UNDERFLOW, stored {full_result & 0xFFFF})")
                         else:
-                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {result}")
+                            self.z_flag = False
+                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result}")
+                        result = full_result & 0xFFFF
 
                     elif instr == 'MUL':
                         full_result = val1 * val2
-                        result = full_result & 0xFFFF
-                        if full_result > 0xFFFF:
-                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result} (переполнение, сохранено {result})")
+                        if full_result > 0xFFFF: # Overflow check
+                            self.z_flag = True
+                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
                         else:
-                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {result}")
+                            self.z_flag = False
+                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result}")
+                        result = full_result & 0xFFFF
 
                     elif instr == 'DIV':
                         if val2 == 0:
@@ -418,9 +424,6 @@ class SimpleAssembler:
 
                     # Сохраняем результат
                     self.registers[dest_val] = result
-
-                    # Устанавливаем флаг Z
-                    self.z_flag = (result == 0)
 
                 else:
                     raise ValueError(f"Неизвестная команда '{instr}'")
@@ -482,7 +485,6 @@ class SimpleAssembler:
             print(reg_line)
         print(f"Память (первые 10 ячеек): {[self.memory[i] for i in range(10)]}")
         print(f"Метки: {self.labels}")
-
 
 def main():
     """Главная функция"""

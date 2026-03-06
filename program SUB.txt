@@ -17,20 +17,20 @@ DO:
     CMP R0 R1       # A = B?
     JZ EXIT
 
-    # Да
-    SUB R3 R0 R1    # A > B?
+    # Нет
+    SUB R3 R0 R1    # A < B?
     JZ BhA
 
-    # Да
+    # Нет
     SUB R0 R0 R1    # A = A - B
     JMP DO
 
 BhA:
-    # Нет
+    # Да
     SUB R1 R1 R0    # B = B - A
     JMP DO
 
 EXIT:
-    # Нет
+    # Да
     # Результат в R0
     HLT
