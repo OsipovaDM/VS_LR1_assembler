@@ -10,6 +10,7 @@ class SimpleAssembler:
         self.registers = [0] * 8  # 8 регистров R0-R7
         self.memory = [0] * 256  # Память данных (256 ячеек)
         self.running = False  # Флаг выполнения программы
+        self.z_flag = False  # Флаг нуля (Z)
         
         # Внутреннее представление программы
         self.lines = []  # Исходные строки
@@ -17,7 +18,11 @@ class SimpleAssembler:
         self.labels = {}  # Метки: {имя_метки: адрес}
         
         # Таблица допустимых команд
-        self.valid_instructions = {'HLT', 'NOP', 'JMP', 'MOV'}
+        self.valid_instructions = {
+            'HLT', 'NOP', 'JMP', 'JZ', 'JNZ',  # Управление
+            'MOV',                               # Пересылки
+            'ADD', 'SUB', 'MUL', 'DIV', 'MOD'    # Арифметика
+        }
     
     def load_program(self, filename: str) -> bool:
         """Загрузка программы из файла"""
@@ -116,15 +121,15 @@ class SimpleAssembler:
                     error_count += 1
                 
                 # Проверка синтаксиса команд
-                if instr == 'JMP':
+                if instr in ['JMP', 'JZ', 'JNZ']:
                     if len(parts) != 2:
-                        print(f"Ошибка (строка {i}): JMP требует 1 операнд (метку)")
+                        print(f"Ошибка (строка {i}): {instr} требует 1 операнд (метку)")
                         error_count += 1
                     else:
                         try:
                             op_type, op_val = self.parse_operand(parts[1])
                             if op_type != 'label':
-                                print(f"Ошибка (строка {i}): JMP требует метку, получен {parts[1]}")
+                                print(f"Ошибка (строка {i}): {instr} требует метку, получен {parts[1]}")
                                 error_count += 1
                         except ValueError as e:
                             print(f"Ошибка (строка {i}): {e}")
@@ -161,6 +166,39 @@ class SimpleAssembler:
                             print(f"Ошибка (строка {i}): {e}")
                             error_count += 1
                 
+                elif instr in ['ADD', 'SUB', 'MUL', 'DIV', 'MOD']:
+                    # 3-адресная модель: ADD Rdest Rsrc1 Rsrc2
+                    if len(parts) != 4:
+                        print(f"Ошибка (строка {i}): {instr} требует 3 операнда: Rdest Rsrc1 Rsrc2")
+                        error_count += 1
+                    else:
+                        try:
+                            # Проверяем операнды
+                            dest_type, dest_val = self.parse_operand(parts[1])
+                            src1_type, src1_val = self.parse_operand(parts[2])
+                            src2_type, src2_val = self.parse_operand(parts[3])
+                            
+                            # Первый операнд должен быть регистром
+                            if dest_type != 'reg':
+                                print(f"Ошибка (строка {i}): Первый операнд должен быть регистром")
+                                error_count += 1
+                            
+                            # Второй операнд может быть регистром
+                            if src1_type != 'reg':
+                                print(f"Ошибка (строка {i}): Второй операнд должен быть регистром")
+                                error_count += 1
+                            
+                            # Третий операнд может быть регистром
+                            if src2_type != 'reg':
+                                print(f"Ошибка (строка {i}): Третий операнд должен быть регистром")
+                                error_count += 1
+                            
+                            # Для DIV и MOD проверка деления на ноль будет в execute
+                                
+                        except ValueError as e:
+                            print(f"Ошибка (строка {i}): {e}")
+                            error_count += 1
+                
                 address += 1
         
         return error_count == 0
@@ -187,6 +225,17 @@ class SimpleAssembler:
         
         return error_count == 0
     
+    def get_operand_value(self, op_type: str, op_val: Union[int, str]) -> int:
+        """Получение значения операнда"""
+        if op_type == 'reg':
+            return self.registers[op_val]
+        elif op_type == 'imm':
+            return op_val
+        elif op_type == 'mem':
+            return self.memory[op_val]
+        else:
+            raise ValueError(f"Невозможно получить значение для типа {op_type}")
+    
     def execute(self) -> bool:
         """Выполнение программы"""
         if not self.instructions:
@@ -195,6 +244,7 @@ class SimpleAssembler:
         
         self.pc = 0
         self.running = True
+        self.z_flag = False
         executed_count = 0
         max_executions = 1000
         
@@ -213,20 +263,31 @@ class SimpleAssembler:
                 elif instr == 'NOP':
                     pass
                 
-                elif instr == 'JMP':
+                elif instr in ['JMP', 'JZ', 'JNZ']:
                     if len(operands) != 1:
-                        raise ValueError("JMP требует 1 операнд")
+                        raise ValueError(f"{instr} требует 1 операнд")
                     
                     op_type, label = self.parse_operand(operands[0])
                     if op_type != 'label':
-                        raise ValueError(f"JMP требует метку, получен {operands[0]}")
+                        raise ValueError(f"{instr} требует метку, получен {operands[0]}")
                     
                     if label not in self.labels:
                         raise ValueError(f"Метка '{label}' не найдена")
                     
-                    self.pc = self.labels[label]
-                    print(f"  JMP -> {label} (адрес {self.pc})")
-                    continue
+                    should_jump = False
+                    if instr == 'JMP':
+                        should_jump = True
+                    elif instr == 'JZ':
+                        should_jump = self.z_flag
+                    elif instr == 'JNZ':
+                        should_jump = not self.z_flag
+                    
+                    if should_jump:
+                        self.pc = self.labels[label]
+                        print(f"  {instr} -> {label} (адрес {self.pc})")
+                        continue
+                    else:
+                        print(f"  {instr} -> {label} (условие не выполнено)")
                 
                 elif instr == 'MOV':
                     if len(operands) != 2:
@@ -259,6 +320,75 @@ class SimpleAssembler:
                     
                     else:
                         raise ValueError(f"Недопустимая комбинация операндов MOV: {dest_type} <- {src_type}")
+                
+                elif instr in ['ADD', 'SUB', 'MUL', 'DIV', 'MOD']:
+                    if len(operands) != 3:
+                        raise ValueError(f"{instr} требует 3 операнда")
+                    
+                    # Парсим операнды
+                    dest_type, dest_val = self.parse_operand(operands[0])
+                    src1_type, src1_val = self.parse_operand(operands[1])
+                    src2_type, src2_val = self.parse_operand(operands[2])
+                    
+                    # Проверяем типы
+                    if dest_type != 'reg':
+                        raise ValueError("Первый операнд должен быть регистром")
+                    
+                    if src1_type != 'reg':
+                        raise ValueError("Второй операнд должен быть регистром")
+                    
+                    if src2_type != 'reg':
+                        raise ValueError("Третий операнд должен быть регистром")
+                    
+                    # Получаем значения
+                    val1 = self.get_operand_value(src1_type, src1_val)
+                    val2 = self.get_operand_value(src2_type, src2_val)
+                    
+                    # Выполняем операцию
+                    result = 0
+                    full_result = 0  # Для проверки переполнения
+                    
+                    if instr == 'ADD':
+                        full_result = val1 + val2
+                        result = full_result & 0xFFFF
+                        if full_result > 0xFFFF:
+                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result} (переполнение, сохранено {result})")
+                        else:
+                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {result}")
+                    
+                    elif instr == 'SUB':
+                        full_result = val1 - val2
+                        result = full_result & 0xFFFF
+                        if full_result < 0:
+                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result} (отрицательное, сохранено {result} в доп. коде)")
+                        else:
+                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {result}")
+                    
+                    elif instr == 'MUL':
+                        full_result = val1 * val2
+                        result = full_result & 0xFFFF
+                        if full_result > 0xFFFF:
+                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result} (переполнение, сохранено {result})")
+                        else:
+                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {result}")
+                    
+                    elif instr == 'DIV':
+                        if val2 == 0:
+                            raise ValueError("Деление на ноль")
+                        result = (val1 // val2) & 0xFFFF
+                        print(f"  DIV R{dest_val} <- {val1} / {val2} = {result}")
+                    
+                    elif instr == 'MOD':
+                        if val2 == 0:
+                            raise ValueError("Деление на ноль (MOD)")
+                        result = (val1 % val2) & 0xFFFF
+                        print(f"  MOD R{dest_val} <- {val1} % {val2} = {result}")
+                    
+                    # Сохраняем результат
+                    self.registers[dest_val] = result
+                    
+                    # Устанавливаем флаг Z
+                    self.z_flag = (result == 0)
                 
                 else:
                     raise ValueError(f"Неизвестная команда '{instr}'")
@@ -310,6 +440,7 @@ class SimpleAssembler:
         """Отладочный вывод состояния"""
         print(f"\n--- Состояние ---")
         print(f"PC: {self.pc}")
+        print(f"Z: {self.z_flag}")
         print("Регистры:")
         for i in range(0, 8, 4):
             reg_line = ""
