@@ -395,7 +395,7 @@ class SimpleAssembler:
 
                     elif instr == 'SUB':
                         # Проверка на переполнение
-                        if val1 < (val2-max_num+1) or (max_num+val2) > val1:
+                        if val1 < (val2-max_num+1) or (max_num+val2) < val1:
                             self.running = False
                             full_result = max_num
                             print(f"  Попытка SUB R{dest_val} <- {val1} - {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
