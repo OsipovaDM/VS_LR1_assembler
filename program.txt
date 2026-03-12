@@ -9,28 +9,31 @@
 # Третий вариант (наиболее эффективный - с использованием остатка)
 # Использует MOD для быстрого вычисления
 GCD_WITH_MOD:
-    MOV R0 113         # Загружаем первое число a (12)
+    MOV R0 113        # Загружаем первое число a (12)
     MOV R1 99         # Загружаем второе число b (8)
     MOV R7 0
     
 DO:
-    CMP R0 R1       # A = B?
+    CMP R1 R7       # B = 0?
+    JZ EXIT
+    CMP R0 R7       # A = 0?
     JZ EXIT
 
-    # Да
-    SUB R3 R0 R1    # A > B?
+    # Нет
+    SUB R3 R0 R1    # A < B?
     JZ BhA
 
-    # Да
-    SUB R0 R0 R1    # A = A - B
+    # Нет
+    MOD R0 R0 R1    # A = A % B
     JMP DO
 
 BhA:
-    # Нет
-    SUB R1 R1 R0    # B = B - A
+    # Да
+    MOD R1 R1 R0    # B = B % A
     JMP DO
 
 EXIT:
-    # Нет
+    # Да
     # Результат в R0
+    ADD R0 R0 R1    # A = A + B
     HLT

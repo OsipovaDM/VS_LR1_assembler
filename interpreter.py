@@ -378,52 +378,68 @@ class SimpleAssembler:
 
                     # Выполняем операцию
                     result = 0
-                    full_result = 0  # Для проверки переполнения
+                    full_result = 0  # Для отладочного вывода
+                    max_num = 0xFFFF
 
                     if instr == 'ADD':
-                        full_result = val1 + val2
-                        if full_result > 0xFFFF: # Overflow check
-                            self.z_flag_flag = True
-                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
+                        # Проверка на переполнение
+                        if max_num - val1 < val2 or (-max_num+1-val1) > val2:
+                            self.running = False
+                            full_result = max_num
+                            print(f"  ПопыткаADD R{dest_val} <- {val1} + {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
+                            print("Программа завершена (HLT из-за переполнения)")
                         else:
-                            self.z_flag = False
+                            full_result = val1 + val2
                             print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result}")
-                        result = full_result & 0xFFFF
+                            result = full_result
 
                     elif instr == 'SUB':
-                        full_result = val1 - val2
-                        if full_result < 0: # Underflow in unsigned arithmetic
-                            self.z_flag = True
-                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result} (UNDERFLOW, stored {full_result & 0xFFFF})")
+                        # Проверка на переполнение
+                        if val1 < (val2-max_num+1) or (max_num+val2) > val1:
+                            self.running = False
+                            full_result = max_num
+                            print(f"  Попытка SUB R{dest_val} <- {val1} - {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
+                            print("Программа завершена (HLT из-за переполнения)")
                         else:
-                            self.z_flag = False
+                            full_result = val1 - val2
                             print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result}")
-                        result = full_result & 0xFFFF
+                            result = full_result
 
                     elif instr == 'MUL':
-                        full_result = val1 * val2
-                        if full_result > 0xFFFF: # Overflow check
-                            self.z_flag = True
-                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
+                        # Проверка на переполнение
+                        if val2 != 0 and ((max_num // val2) < val1 or (val1 < ((-max_num+1) // val2))):
+                            self.running = False
+                            full_result = max_num
+                            print(f"  Попытка MUL R{dest_val} <- {val1} * {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
+                            print("Программа завершена (HLT из-за переполнения)")
                         else:
-                            self.z_flag = False
+                            full_result = val1 * val2
                             print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result}")
-                        result = full_result & 0xFFFF
+                            result = full_result   
 
                     elif instr == 'DIV':
                         if val2 == 0:
                             raise ValueError("Деление на ноль")
-                        result = (val1 // val2) & 0xFFFF
-                        print(f"  DIV R{dest_val} <- {val1} / {val2} = {result}")
+                        # Переполнение для дополнительного кода: минимальное число / -1
+                        if val1 == -max_num+1 and val2 == -1:
+                            self.running = False
+                            full_result = -max_num
+                            print(f"  Попытка DIV R{dest_val} <- {val1} / {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
+                            print("Программа завершена (HLT из-за переполнения)")
+                        else:
+                            result = val1 // val2
+                            print(f"  DIV R{dest_val} <- {val1} / {val2} = {result}")
 
                     elif instr == 'MOD':
                         if val2 == 0:
                             raise ValueError("Деление на ноль (MOD)")
-                        result = (val1 % val2) & 0xFFFF
+                        result = (val1 % val2)
                         print(f"  MOD R{dest_val} <- {val1} % {val2} = {result}")
 
                     # Сохраняем результат
                     self.registers[dest_val] = result
+                    if full_result < 0:
+                        self.z_flag = True
 
                 else:
                     raise ValueError(f"Неизвестная команда '{instr}'")
