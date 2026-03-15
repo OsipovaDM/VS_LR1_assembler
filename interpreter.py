@@ -438,7 +438,7 @@ class SimpleAssembler:
 
                     # Сохраняем результат
                     self.registers[dest_val] = result
-                    if full_result < 0:
+                    if result <= 0:
                         self.z_flag = True
 
                 else:
