@@ -155,68 +155,41 @@ class PipelineSimulator(SimpleAssembler):
             extra={},
         )
 
-    def _commit_instruction(self, pinstr: PipelineInstruction, debug: bool) -> None:
+    def _execute_stage_ex(self, pinstr: PipelineInstruction, debug: bool) -> None:
         """
-        Фаза WB: фиксация результата в архитектурном состоянии.
-
-        Все архитектурные записи (регистры, память, Z) происходят только здесь
+        Стадия EX: выполнение и вычисление условий/адресов.
+        Результат сохраняется в pinstr.result и pinstr.extra; фиксация в WB.
         """
-        # что соответствует требованиям работы
         instr = pinstr.instr
         operands = pinstr.operands
         addr = pinstr.addr
 
         if instr == "HLT":
-            if debug: print(f"[WB @{addr}] HLT -> останов.")
-            self.running = False
+            if debug:
+                print(f"[EX @{addr}] HLT")
             return
 
         if instr == "NOP":
-            if debug: print(f"[WB @{addr}] NOP")
+            if debug:
+                print(f"[EX @{addr}] NOP")
             return
 
         if instr == "MOV":
-            dest_type, dest_val = self.parse_operand(operands[0]) # приемник
-            src_type, src_val = self.parse_operand(operands[1]) # источник
-
-            if dest_type == "reg":
-                if src_type == "reg":
-                    self.registers[dest_val] = self.registers[src_val]
-                    if debug:
-                        print(
-                            f"[WB @{addr}] MOV R{dest_val} <- R{src_val} "
-                            f"({self.registers[dest_val]})"
-                        )
-                elif src_type == "imm":
-                    self.registers[dest_val] = src_val
-                    if debug: print(f"[WB @{addr}] MOV R{dest_val} <- {src_val}")
-                elif src_type == "mem":
-                    # значение было загружено на стадии MEM в pinstr.result
-                    if pinstr.result is None:
-                        # fallback, если по какой‑то причине результат не был
-                        # подготовлен заранее
-                        pinstr.result = self.memory[src_val]
-                    self.registers[dest_val] = pinstr.result
-                    if debug:
-                        print(
-                            f"[WB @{addr}] MOV R{dest_val} <- [{src_val}] "
-                            f"({self.registers[dest_val]})"
-                        )
-                else:
-                    raise ValueError("Недопустимый источник для MOV в WB")
-
-            elif dest_type == "mem":
-                if src_type != "reg":
-                    raise ValueError(
-                        "В память можно записывать только из регистра (MOV)"
-                    )
-                self.memory[dest_val] = self.registers[src_val]
+            dest_type, dest_val = self.parse_operand(operands[0])
+            src_type, src_val = self.parse_operand(operands[1])
+            if dest_type == "reg" and src_type == "reg":
+                pinstr.result = self.registers[src_val]
                 if debug:
-                    print(
-                        f"[WB @{addr}] MOV [{dest_val}] <- R{src_val} "
-                        f"({self.registers[src_val]})"
-                    )
-
+                    print(f"[EX @{addr}] MOV R{dest_val} <- R{src_val} (вычислено: {pinstr.result})")
+            elif dest_type == "reg" and src_type == "imm":
+                pinstr.result = src_val
+                if debug:
+                    print(f"[EX @{addr}] MOV R{dest_val} <- {src_val}")
+            elif dest_type == "mem" and src_type == "reg":
+                pinstr.result = self.registers[src_val]
+                if debug:
+                    print(f"[EX @{addr}] MOV [{dest_val}] <- R{src_val} (значение: {pinstr.result})")
+            # MOV reg <- mem: результат формируется на стадии MEM
             return
 
         if instr == "CMP":
@@ -226,84 +199,151 @@ class PipelineSimulator(SimpleAssembler):
                 raise ValueError("CMP требует два операнда‑регистра")
             val1 = self.registers[op1_val]
             val2 = self.registers[op2_val]
-            self.z_flag = (val1 == val2)
+            pinstr.extra["z_result"] = (val1 == val2)
             if debug:
-                print(
-                    f"[WB @{addr}] CMP R{op1_val} ({val1}), "
-                    f"R{op2_val} ({val2}) -> Z={self.z_flag}"
-                )
+                print(f"[EX @{addr}] CMP R{op1_val} ({val1}), R{op2_val} ({val2}) -> Z={pinstr.extra['z_result']}")
             return
 
         if instr in {"ADD", "SUB", "MUL", "DIV", "MOD"}:
             dest_type, dest_val = self.parse_operand(operands[0])
             src1_type, src1_val = self.parse_operand(operands[1])
             src2_type, src2_val = self.parse_operand(operands[2])
-
-            if dest_type != "reg":
-                raise ValueError("Первый операнд должен быть регистром")
-            if src1_type != "reg" or src2_type != "reg":
-                raise ValueError("Второй и третий операнды должны быть регистрами")
-
+            if dest_type != "reg" or src1_type != "reg" or src2_type != "reg":
+                raise ValueError("Арифметика: все операнды — регистры")
             val1 = self.registers[src1_val]
             val2 = self.registers[src2_val]
-
             max_num = 0xFFFF
             full_result: int
+            pinstr.extra["overflow"] = False
+            pinstr.extra["error"] = None
 
             if instr == "ADD":
                 if max_num - val1 < val2 or (-max_num + 1 - val1) > val2:
                     full_result = max_num
-                    raise ValueError(f"[WB @{addr}] ADD overflow: {val1} + {val2} -> {full_result}")
+                    pinstr.extra["overflow"] = True
+                    if debug:
+                        print(f"[EX @{addr}] ADD overflow: {val1} + {val2}")
                 else:
                     full_result = val1 + val2
-                    if debug: print(f"[WB @{addr}] ADD R{dest_val} <- {val1} + {val2} = {full_result}")
+                    if debug:
+                        print(f"[EX @{addr}] ADD R{dest_val} <- {val1} + {val2} = {full_result}")
 
             elif instr == "SUB":
                 if val1 < (val2 - max_num + 1) or (max_num + val2) < val1:
                     full_result = max_num
-                    raise ValueError(f"[WB @{addr}] SUB overflow: {val1} - {val2} -> {full_result}")
+                    pinstr.extra["overflow"] = True
+                    if debug:
+                        print(f"[EX @{addr}] SUB overflow: {val1} - {val2}")
                 else:
                     full_result = val1 - val2
-                    if debug: print(f"[WB @{addr}] SUB R{dest_val} <- {val1} - {val2} = {full_result}")
+                    if debug:
+                        print(f"[EX @{addr}] SUB R{dest_val} <- {val1} - {val2} = {full_result}")
 
             elif instr == "MUL":
                 if val2 != 0 and (
                     (max_num // val2) < val1 or (val1 < ((-max_num + 1) // val2))
                 ):
                     full_result = max_num
-                    raise ValueError(f"[WB @{addr}] MUL overflow: {val1} * {val2} -> {full_result}")
+                    pinstr.extra["overflow"] = True
+                    if debug:
+                        print(f"[EX @{addr}] MUL overflow: {val1} * {val2}")
                 else:
                     full_result = val1 * val2
-                    if debug: print(f"[WB @{addr}] MUL R{dest_val} <- {val1} * {val2} = {full_result}")
+                    if debug:
+                        print(f"[EX @{addr}] MUL R{dest_val} <- {val1} * {val2} = {full_result}")
 
             elif instr == "DIV":
                 if val2 == 0:
-                    self.running = False
-                    raise ValueError("Деление на ноль (DIV)")
-                if val1 == -max_num + 1 and val2 == -1:
-                    full_result = max_num
-                    raise ValueError(f"[WB @{addr}] DIV overflow: {val1} / {val2} -> {full_result}")
+                    pinstr.extra["error"] = "Деление на ноль (DIV)"
+                    full_result = 0
+                elif val1 == -max_num + 1 and val2 == -1:
+                    full_result = -max_num
+                    pinstr.extra["overflow"] = True
+                    if debug:
+                        print(f"[EX @{addr}] DIV overflow")
                 else:
                     full_result = val1 // val2
-                    if debug: print(f"[WB @{addr}] DIV R{dest_val} <- {val1} / {val2} = {full_result}")
+                    if debug:
+                        print(f"[EX @{addr}] DIV R{dest_val} <- {val1} / {val2} = {full_result}")
 
             else:  # MOD
                 if val2 == 0:
-                    self.running = False
-                    raise ValueError("Деление на ноль (MOD)")
-                full_result = val1 % val2
-                if debug: print(f"[WB @{addr}] MOD R{dest_val} <- {val1} % {val2} = {full_result}")
+                    pinstr.extra["error"] = "Деление на ноль (MOD)"
+                    full_result = 0
+                else:
+                    full_result = val1 % val2
+                    if debug:
+                        print(f"[EX @{addr}] MOD R{dest_val} <- {val1} % {val2} = {full_result}")
 
-            # Фиксация результата в регистре
-            self.registers[dest_val] = full_result
-
-            # Упрощённая модель флага Z: отмечаем отрицательный результат
-            self.z_flag = full_result < 0
+            pinstr.result = full_result & 0xFFFF
+            pinstr.extra["z_flag"] = full_result < 0
             return
 
         if instr in {"JMP", "JZ", "JNZ"}:
-            # Изменение PC для переходов уже произошло на стадии EX
-            if debug: print(f"[WB @{addr}] {instr} (запись в архитектурное состояние не требуется)")
+            if debug:
+                print(f"[EX @{addr}] {instr} (решение о переходе — в основном цикле)")
+            return
+
+        raise ValueError(f"Неизвестная команда '{instr}' в EX")
+
+    def _commit_instruction(self, pinstr: PipelineInstruction, debug: bool) -> None:
+        """
+        Стадия WB: только фиксация уже вычисленного результата в архитектурном
+        состоянии (регистры, флаг Z). Вычисление выполняется на EX, доступ к
+        памяти — на MEM.
+        """
+        instr = pinstr.instr
+        operands = pinstr.operands
+        addr = pinstr.addr
+
+        if instr == "HLT":
+            if debug:
+                print(f"[WB @{addr}] HLT -> останов.")
+            self.running = False
+            return
+
+        if instr == "NOP":
+            if debug:
+                print(f"[WB @{addr}] NOP")
+            return
+
+        if instr == "MOV":
+            dest_type, dest_val = self.parse_operand(operands[0])
+            src_type, src_val = self.parse_operand(operands[1])
+            # Запись в память выполняется на стадии MEM; в WB только запись в регистр
+            if dest_type == "reg":
+                if pinstr.result is None and src_type == "mem":
+                    pinstr.result = self.memory[src_val]
+                self.registers[dest_val] = pinstr.result
+                if debug:
+                    print(f"[WB @{addr}] MOV R{dest_val} <- {pinstr.result} (фиксация)")
+            # dest_type == "mem": уже записано в MEM
+            return
+
+        if instr == "CMP":
+            self.z_flag = pinstr.extra.get("z_result", False)
+            if debug:
+                print(f"[WB @{addr}] CMP -> Z={self.z_flag} (фиксация)")
+            return
+
+        if instr in {"ADD", "SUB", "MUL", "DIV", "MOD"}:
+            if pinstr.extra.get("error"):
+                if debug:
+                    print(f"[WB @{addr}] {instr}: {pinstr.extra['error']}")
+                self.running = False
+                return
+            if pinstr.extra.get("overflow"):
+                self.running = False
+            dest_type, dest_val = self.parse_operand(operands[0])
+            self.registers[dest_val] = pinstr.result
+            self.z_flag = pinstr.extra.get("z_flag", False)
+            if debug:
+                print(f"[WB @{addr}] {instr} R{dest_val} <- {pinstr.result} (фиксация)")
+            return
+
+        if instr in {"JMP", "JZ", "JNZ"}:
+            if debug:
+                print(f"[WB @{addr}] {instr} (фиксация не требуется)")
             return
 
         raise ValueError(f"Неизвестная команда '{instr}' в WB")
@@ -398,23 +438,29 @@ class PipelineSimulator(SimpleAssembler):
                 instr_mem.stage = "WB"
                 new_pipeline[4] = instr_mem
 
-            # EX -> MEM (для MOV с памятью здесь можем подготовить result)
+            # EX -> MEM: доступ к памяти (загрузка или запись)
             if pipeline[2] is not None:
                 instr_ex = pipeline[2]
                 instr_ex.stage = "MEM"
 
-                # Для MOV с источником [addr] читаем память на MEM, но фиксируем в WB
                 if instr_ex.instr == "MOV":
                     dest_type, dest_val = self.parse_operand(instr_ex.operands[0])
                     src_type, src_val = self.parse_operand(instr_ex.operands[1])
                     if src_type == "mem":
                         instr_ex.result = self.memory[src_val]
+                        if debug:
+                            print(f"[MEM @{instr_ex.addr}] MOV загрузка [{src_val}] -> {instr_ex.result}")
+                    elif dest_type == "mem":
+                        self.memory[dest_val] = instr_ex.result
+                        if debug:
+                            print(f"[MEM @{instr_ex.addr}] MOV запись [{dest_val}] <- {instr_ex.result}")
 
                 new_pipeline[3] = instr_ex
 
-            # ID -> EX (если нет stall)
+            # ID -> EX: выполнение вычислений на стадии EX
             if id_instr is not None and not stall_id:
                 id_instr.stage = "EX"
+                self._execute_stage_ex(id_instr, debug)
                 new_pipeline[2] = id_instr
             else:
                 new_pipeline[2] = None
