@@ -21,3 +21,24 @@ MOV [30] R0      # память <- регистр
 MOV R2 [30]      # регистр <- память
 MOV R3 R1        # регистр <- регистр
 HLT
+
+
+
+
+    MOV R3 13
+    MOV R0 1
+    MOV R1 10
+DO:
+    CMP R1 R3
+    JZ EXIT
+    NOP
+    NOP
+    NOP
+    ADD R1 R1 R0
+    NOP
+    NOP
+    NOP
+    jmp DO
+EXIT:
+
+    HLT
