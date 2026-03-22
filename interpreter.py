@@ -1,5 +1,5 @@
 import sys
-from typing import List, Dict, Tuple, Any, Union
+from typing import List, Tuple, Union
 
 class SimpleAssembler:
     """Простой интерпретатор псевдо-ассемблера"""
@@ -94,18 +94,15 @@ class SimpleAssembler:
         """Первый проход: сбор меток и проверка синтаксиса"""
         address = 0
         error_count = 0
-
         for i, raw_line in enumerate(self.lines, 1):
             line = self.remove_comments(raw_line)
             if not line:
                 continue
-
             parts = line.split()
 
             # Проверка на метку
             if parts[0].endswith(':'):
                 label = parts[0][:-1]
-
                 if label in self.labels:
                     print(f"Ошибка (строка {i}): Метка '{label}' уже определена")
                     error_count += 1
@@ -216,19 +213,16 @@ class SimpleAssembler:
                             error_count += 1
 
                 address += 1
-
         return error_count == 0
 
     def second_pass(self) -> bool:
         """Второй проход: формирование внутреннего представления"""
         address = 0
         error_count = 0
-
         for i, raw_line in enumerate(self.lines, 1):
             line = self.remove_comments(raw_line)
             if not line:
                 continue
-
             parts = line.split()
 
             # Пропускаем строки с метками
@@ -238,7 +232,6 @@ class SimpleAssembler:
                 # Сохраняем инструкцию с операндами как есть
                 self.instructions.append((address, parts[0], parts[1:]))
                 address += 1
-
         return error_count == 0
 
     def get_operand_value(self, op_type: str, op_val: Union[int, str]) -> int:
@@ -253,7 +246,18 @@ class SimpleAssembler:
             raise ValueError(f"Невозможно получить значение для типа {op_type}")
 
     def execute(self) -> bool:
-        """Выполнение программы"""
+        """Базовое выполнение без статистики (для совместимости)"""
+        return self.execute_with_stats(debug=False)
+
+    def execute_with_stats(self, debug: bool = False) -> bool:
+        """Выполнение программы с отладочным выводом и сбором статистики"""
+        latency_map = {
+            'MUL': 4,
+            'DIV': 4,
+            'MOD': 4,
+            # остальные по умолчанию 1
+        }
+        
         if not self.instructions:
             print("Ошибка: Программа не загружена")
             return False
@@ -263,6 +267,10 @@ class SimpleAssembler:
         self.z_flag = False
         executed_count = 0
         max_executions = 1000
+        cycles = 0   # для последовательной модели каждый такт = одна инструкция
+
+        if debug:
+            print("\n=== Последовательное выполнение (пошагово) ===")
 
         while self.running and executed_count < max_executions:
             if self.pc >= len(self.instructions):
@@ -271,13 +279,20 @@ class SimpleAssembler:
 
             addr, instr, operands = self.instructions[self.pc]
 
+            if debug:
+                print(f"\n--- Инструкция {executed_count+1} (адрес {addr}) ---")
+                # print(f"До: PC={self.pc}, Z={self.z_flag}, R={self.registers[:4]}, память[0:4]={self.memory[:4]}")
+
             try:
+                # --- Код выполнения (аналогично исходному execute) ---
                 if instr == 'HLT':
-                    print("Программа завершена (HLT)")
+                    if debug:
+                        print("  HLT -> останов")
                     self.running = False
 
                 elif instr == 'NOP':
-                    pass
+                    if debug:
+                        print("  NOP")
 
                 elif instr in ['JMP', 'JZ', 'JNZ']:
                     if len(operands) != 1:
@@ -286,10 +301,8 @@ class SimpleAssembler:
                     op_type, label = self.parse_operand(operands[0])
                     if op_type != 'label':
                         raise ValueError(f"{instr} требует метку, получен {operands[0]}")
-
                     if label not in self.labels:
                         raise ValueError(f"Метка '{label}' не найдена")
-
                     should_jump = False
                     if instr == 'JMP':
                         should_jump = True
@@ -297,13 +310,16 @@ class SimpleAssembler:
                         should_jump = self.z_flag
                     elif instr == 'JNZ':
                         should_jump = not self.z_flag
-
                     if should_jump:
                         self.pc = self.labels[label]
-                        print(f"  {instr} -> {label} (адрес {self.pc})")
+                        if debug:
+                            print(f"  {instr} -> {label} (адрес {self.pc})")
+                        executed_count += 1
+                        cycles += latency_map.get(instr, 1)
                         continue
                     else:
-                        print(f"  {instr} -> {label} (условие не выполнено)")
+                        if debug:
+                            print(f"  {instr} -> {label} (условие не выполнено)")
 
                 elif instr == 'MOV':
                     if len(operands) != 2:
@@ -317,25 +333,25 @@ class SimpleAssembler:
                     if dest_type == 'reg' and src_type == 'reg':
                         # регистр <- регистр
                         self.registers[dest_val] = self.registers[src_val]
-                        print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]}) ")
-
+                        if debug:
+                            print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]})")
                     elif dest_type == 'reg' and src_type == 'imm':
                         # регистр <- число
                         self.registers[dest_val] = src_val
-                        print(f"  MOV R{dest_val} <- {src_val}")
-
+                        if debug:
+                            print(f"  MOV R{dest_val} <- {src_val}")
                     elif dest_type == 'reg' and src_type == 'mem':
                         # регистр <- память
                         self.registers[dest_val] = self.memory[src_val]
-                        print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]}) ")
-
+                        if debug:
+                            print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]})")
                     elif dest_type == 'mem' and src_type == 'reg':
                         # память <- регистр
                         self.memory[dest_val] = self.registers[src_val]
-                        print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]}) ")
-
+                        if debug:
+                            print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]})")
                     else:
-                        raise ValueError(f"Недопустимая комбинация операндов MOV: {dest_type} <- {src_type}")
+                        raise ValueError(f"Недопустимая комбинация MOV: {dest_type} <- {src_type}")
 
                 elif instr == 'CMP':
                     if len(operands) != 2:
@@ -343,15 +359,13 @@ class SimpleAssembler:
 
                     op1_type, op1_val = self.parse_operand(operands[0])
                     op2_type, op2_val = self.parse_operand(operands[1])
-
                     if op1_type != 'reg' or op2_type != 'reg':
-                        raise ValueError(f"CMP требует два операнда регистра, получено {operands[0]}, {operands[1]}")
-
+                        raise ValueError("CMP требует два регистра")
                     val1 = self.registers[op1_val]
                     val2 = self.registers[op2_val]
-
                     self.z_flag = (val1 == val2)
-                    print(f"  CMP R{op1_val} ({val1}), R{op2_val} ({val2}) -> Z={self.z_flag}")
+                    if debug:
+                        print(f"  CMP R{op1_val} ({val1}), R{op2_val} ({val2}) -> Z={self.z_flag}")
 
                 elif instr in ['ADD', 'SUB', 'MUL', 'DIV', 'MOD']:
                     if len(operands) != 3:
@@ -380,66 +394,56 @@ class SimpleAssembler:
                     result = 0
                     full_result = 0  # Для отладочного вывода
                     max_num = 0xFFFF
-
+                    full_result = 0
+                    result = 0
                     if instr == 'ADD':
                         # Проверка на переполнение
                         if max_num - val1 < val2 or (-max_num+1-val1) > val2:
                             self.running = False
                             full_result = max_num
-                            print(f"  ПопыткаADD R{dest_val} <- {val1} + {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
-                            print("Программа завершена (HLT из-за переполнения)")
+                            if debug:
+                                print(f"  ADD overflow: {val1}+{val2}")
                         else:
                             full_result = val1 + val2
-                            print(f"  ADD R{dest_val} <- {val1} + {val2} = {full_result}")
                             result = full_result
-
                     elif instr == 'SUB':
                         # Проверка на переполнение
                         if val1 < (val2-max_num+1) or (max_num+val2) < val1:
                             self.running = False
                             full_result = max_num
-                            print(f"  Попытка SUB R{dest_val} <- {val1} - {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
-                            print("Программа завершена (HLT из-за переполнения)")
+                            if debug:
+                                print(f"  SUB overflow: {val1}-{val2}")
                         else:
                             full_result = val1 - val2
-                            print(f"  SUB R{dest_val} <- {val1} - {val2} = {full_result}")
                             result = full_result
-
                     elif instr == 'MUL':
-                        # Проверка на переполнение
                         if val2 != 0 and ((max_num // val2) < val1 or (val1 < ((-max_num+1) // val2))):
                             self.running = False
                             full_result = max_num
-                            print(f"  Попытка MUL R{dest_val} <- {val1} * {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
-                            print("Программа завершена (HLT из-за переполнения)")
+                            if debug:
+                                print(f"  MUL overflow: {val1}*{val2}")
                         else:
                             full_result = val1 * val2
-                            print(f"  MUL R{dest_val} <- {val1} * {val2} = {full_result}")
-                            result = full_result   
-
+                            result = full_result
                     elif instr == 'DIV':
                         if val2 == 0:
                             raise ValueError("Деление на ноль")
-                        # Переполнение для дополнительного кода: минимальное число / -1
                         if val1 == -max_num+1 and val2 == -1:
                             self.running = False
                             full_result = -max_num
-                            print(f"  Попытка DIV R{dest_val} <- {val1} / {val2} = {full_result} (OVERFLOW, stored {full_result & 0xFFFF})")
-                            print("Программа завершена (HLT из-за переполнения)")
+                            if debug:
+                                print("  DIV overflow")
                         else:
                             result = val1 // val2
-                            print(f"  DIV R{dest_val} <- {val1} / {val2} = {result}")
-
                     elif instr == 'MOD':
                         if val2 == 0:
-                            raise ValueError("Деление на ноль (MOD)")
-                        result = (val1 % val2)
-                        print(f"  MOD R{dest_val} <- {val1} % {val2} = {result}")
-
-                    # Сохраняем результат
+                            raise ValueError("MOD: деление на ноль")
+                        result = val1 % val2
                     self.registers[dest_val] = result
                     if result <= 0:
                         self.z_flag = True
+                    if debug:
+                        print(f"  {instr} R{dest_val} <- {result}")
 
                 else:
                     raise ValueError(f"Неизвестная команда '{instr}'")
@@ -449,42 +453,47 @@ class SimpleAssembler:
                 self.running = False
                 break
 
+            # if debug:
+            #     print(f"После: PC={self.pc+1}, Z={self.z_flag}, R={self.registers[:4]}, память[0:4]={self.memory[:4]}")
+
             self.pc += 1
             executed_count += 1
+            cycles += latency_map.get(instr, 1)
 
         if executed_count >= max_executions:
-            print("Ошибка: Превышен лимит выполнения (возможно зацикливание)")
+            print("Ошибка: превышен лимит выполнения (возможно зацикливание)")
             return False
 
+        # Статистика
+        print("\n=== Статистика последовательного выполнения ===")
+        print(f"Тактов всего:        {cycles}")
+        print(f"Выполнено инструкций: {executed_count}")
+        if executed_count > 0:
+            print(f"CPI:                 {cycles / executed_count:.3f}")
+        print(f"Stall по данным RAW:  0")
+        print(f"Stall структурные:    0")
+        print(f"Flush по переходам:   0")
         return True
 
     def run(self, filename: str) -> bool:
         """Полный цикл: загрузка, компиляция и выполнение"""
         print(f"Загрузка программы из файла: {filename}")
-
         if not self.load_program(filename):
             return False
-
         print(f"Загружено строк: {len(self.lines)}")
-
         print("Первый проход: сбор меток и проверка синтаксиса...")
         if not self.first_pass():
             print("Ошибка компиляции: обнаружены синтаксические ошибки")
             return False
-
         print(f"Найдено меток: {len(self.labels)}")
-
         print("Второй проход: формирование внутреннего представления...")
         if not self.second_pass():
             print("Ошибка при формировании внутреннего представления")
             return False
-
         print(f"Сформировано инструкций: {len(self.instructions)}")
-
         print("\n--- Начало выполнения ---")
         result = self.execute()
         print("--- Конец выполнения ---")
-
         return result
 
     def print_state(self):
@@ -508,19 +517,15 @@ def main():
         print("Использование: python interpreter.py <файл_программы>")
         print("Пример: python interpreter.py program.txt")
         return
-
     filename = sys.argv[1]
-
     asm = SimpleAssembler()
     success = asm.run(filename)
-
     if success:
         print("\nПрограмма выполнена успешно!")
         asm.print_state()
     else:
         print("\nОшибка выполнения программы")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
