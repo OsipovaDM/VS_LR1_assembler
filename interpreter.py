@@ -53,11 +53,18 @@ class SimpleAssembler:
         - ('label', имя_метки) для меток
         """
         token = token.upper()
-
-        # Проверка на память [адрес]
+        # Проверка на память [адрес] или [регистр]
         if token.startswith('[') and token.endswith(']'):
-            addr_token = token[1:-1]  # убираем скобки
-            if addr_token.isdigit():
+            addr_token = token[1:-1]
+            # Если внутри регистр вида R0-R7
+            if addr_token.startswith('R') and len(addr_token) == 2 and addr_token[1].isdigit():
+                reg_num = int(addr_token[1])
+                if 0 <= reg_num <= 7:
+                    return ('mem_reg', reg_num)
+                else:
+                    raise ValueError(f"Недопустимый регистр {addr_token}")
+            # Иначе пытаемся как число
+            elif addr_token.isdigit():
                 addr = int(addr_token)
                 if 0 <= addr <= 255:
                     return ('mem', addr)
@@ -138,27 +145,27 @@ class SimpleAssembler:
                         error_count += 1
                     else:
                         try:
-                            # Проверяем оба операнда
                             dest_type, dest_val = self.parse_operand(parts[1])
                             src_type, src_val = self.parse_operand(parts[2])
-
-                            # Проверка допустимых комбинаций:
-                            # 1. регистр <- регистр/число
-                            # 2. память <- регистр
-                            # 3. регистр <- память
-
+                            # Допустимые комбинации:
+                            # 1. регистр <- регистр/число/память (константа)/память(регистр)
                             if dest_type == 'reg':
-                                if src_type not in ['reg', 'imm', 'mem']:
+                                if src_type not in ['reg', 'imm', 'mem', 'mem_reg']:
                                     print(f"Ошибка (строка {i}): Недопустимый источник для регистра")
                                     error_count += 1
+                            # 2. память (константа) <- регистр
                             elif dest_type == 'mem':
                                 if src_type != 'reg':
                                     print(f"Ошибка (строка {i}): В память можно сохранять только из регистра")
                                     error_count += 1
+                            # 3. память (регистр) <- регистр или число
+                            elif dest_type == 'mem_reg':
+                                if src_type not in ['reg', 'imm']:
+                                    print(f"Ошибка (строка {i}): В память по адресу из регистра можно сохранять только регистр или число")
+                                    error_count += 1
                             else:
                                 print(f"Ошибка (строка {i}): Недопустимый приемник MOV")
                                 error_count += 1
-
                         except ValueError as e:
                             print(f"Ошибка (строка {i}): {e}")
                             error_count += 1
@@ -324,32 +331,33 @@ class SimpleAssembler:
                 elif instr == 'MOV':
                     if len(operands) != 2:
                         raise ValueError("MOV требует 2 операнда")
-
-                    # Парсим операнды
                     dest_type, dest_val = self.parse_operand(operands[0])
                     src_type, src_val = self.parse_operand(operands[1])
 
-                    # Выполняем MOV в зависимости от типов
                     if dest_type == 'reg' and src_type == 'reg':
-                        # регистр <- регистр
                         self.registers[dest_val] = self.registers[src_val]
-                        if debug:
-                            print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]})")
+                        if debug: print(f"  MOV R{dest_val} <- R{src_val} ({self.registers[dest_val]})")
                     elif dest_type == 'reg' and src_type == 'imm':
-                        # регистр <- число
                         self.registers[dest_val] = src_val
-                        if debug:
-                            print(f"  MOV R{dest_val} <- {src_val}")
+                        if debug: print(f"  MOV R{dest_val} <- {src_val}")
                     elif dest_type == 'reg' and src_type == 'mem':
-                        # регистр <- память
                         self.registers[dest_val] = self.memory[src_val]
-                        if debug:
-                            print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]})")
+                        if debug: print(f"  MOV R{dest_val} <- [{src_val}] ({self.memory[src_val]})")
+                    elif dest_type == 'reg' and src_type == 'mem_reg':
+                        addr = self.registers[src_val]
+                        self.registers[dest_val] = self.memory[addr]
+                        if debug: print(f"  MOV R{dest_val} <- [R{src_val}] (адрес {addr}) -> {self.registers[dest_val]}")
                     elif dest_type == 'mem' and src_type == 'reg':
-                        # память <- регистр
                         self.memory[dest_val] = self.registers[src_val]
-                        if debug:
-                            print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]})")
+                        if debug: print(f"  MOV [{dest_val}] <- R{src_val} ({self.registers[src_val]})")
+                    elif dest_type == 'mem_reg' and src_type == 'reg':
+                        addr = self.registers[dest_val]
+                        self.memory[addr] = self.registers[src_val]
+                        if debug: print(f"  MOV [R{dest_val}] <- R{src_val} (адрес {addr}) -> {self.registers[src_val]}")
+                    elif dest_type == 'mem_reg' and src_type == 'imm':
+                        addr = self.registers[dest_val]
+                        self.memory[addr] = src_val
+                        if debug: print(f"  MOV [R{dest_val}] <- {src_val} (адрес {addr})")
                     else:
                         raise ValueError(f"Недопустимая комбинация MOV: {dest_type} <- {src_type}")
 
@@ -443,7 +451,7 @@ class SimpleAssembler:
                     if result <= 0:
                         self.z_flag = True
                     if debug:
-                        print(f"  {instr} R{dest_val} <- {result}")
+                        print(f"  {instr} R{dest_val} <- {result}: {val1}, {val2}")
 
                 else:
                     raise ValueError(f"Неизвестная команда '{instr}'")

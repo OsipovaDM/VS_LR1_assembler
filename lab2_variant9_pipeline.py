@@ -64,14 +64,23 @@ class PipelineSimulator(SimpleAssembler):
                 raise ValueError("MOV требует 2 операнда")
             dest_type, dest_val = self.parse_operand(operands[0])
             src_type, src_val = self.parse_operand(operands[1])
+            # Запись
             if dest_type == "reg":
                 writes.add(reg_obj(dest_val))
             elif dest_type == "mem":
                 writes.add(mem_obj(dest_val))
+            elif dest_type == "mem_reg":
+                # Запись в память по адресу из регистра – зависит от регистра-адреса
+                reads.add(reg_obj(dest_val))
+                # Сама память не добавляем в множество для конфликтов (упрощение)
+            # Чтение
             if src_type == "reg":
                 reads.add(reg_obj(src_val))
             elif src_type == "mem":
                 reads.add(mem_obj(src_val))
+            elif src_type == "mem_reg":
+                reads.add(reg_obj(src_val))  # зависимость от регистра-адреса
+            # imm не читает архитектурное состояние
         elif instr == "CMP":
             if len(operands) != 2:
                 raise ValueError("CMP требует 2 операнда")
@@ -146,11 +155,33 @@ class PipelineSimulator(SimpleAssembler):
                 pinstr.result = src_val
                 if debug:
                     print(f"[EX @{addr}] MOV R{dest_val} <- {src_val}")
+            elif dest_type == "reg" and src_type == "mem":
+                # результат будет загружен на MEM
+                pinstr.result = None
+                pinstr.extra["mem_addr"] = src_val
+                if debug:
+                    print(f"[EX @{addr}] MOV загрузка из [{src_val}] (отложено на MEM)")
+            elif dest_type == "reg" and src_type == "mem_reg":
+                pinstr.result = None
+                pinstr.extra["mem_addr_reg"] = src_val   # номер регистра, содержащего адрес
+                if debug:
+                    print(f"[EX @{addr}] MOV загрузка из [R{src_val}] (отложено на MEM)")
             elif dest_type == "mem" and src_type == "reg":
                 pinstr.result = self.registers[src_val]
+                pinstr.extra["mem_addr"] = dest_val
                 if debug:
-                    print(f"[EX @{addr}] MOV [{dest_val}] <- R{src_val} (значение: {pinstr.result})")
-            # MOV reg <- mem: результат формируется на стадии MEM
+                    print(f"[EX @{addr}] MOV запись по адресу [{dest_val}] <- R{src_val} (значение: {pinstr.result})")
+            elif dest_type == "mem_reg" and src_type == "reg":
+                pinstr.result = self.registers[src_val]
+                pinstr.extra["mem_addr_reg"] = dest_val   # номер регистра с адресом
+                if debug:
+                    print(f"[EX @{addr}] MOV запись по адресу [R{dest_val}] <- R{src_val} (значение: {pinstr.result})")
+            elif dest_type == "mem_reg" and src_type == "imm":
+                pinstr.result = src_val
+                pinstr.extra["mem_addr_reg"] = dest_val
+                if debug:
+                    print(f"[EX @{addr}] MOV запись по адресу [R{dest_val}] <- {src_val}")
+            # MOV reg <- mem_reg или mem – результат на MEM
             return True
         if instr == "CMP":
             op1_type, op1_val = self.parse_operand(operands[0])
@@ -408,19 +439,30 @@ class PipelineSimulator(SimpleAssembler):
             if pipeline[2] is not None and self.running:
                 instr_ex = pipeline[2]
                 if instr_ex.ex_remaining_cycles == 0:
-                    # Инструкция готова к переходу в MEM
                     instr_ex.stage = "MEM"
                     if instr_ex.instr == "MOV":
                         dest_type, dest_val = self.parse_operand(instr_ex.operands[0])
                         src_type, src_val = self.parse_operand(instr_ex.operands[1])
+                        # Загрузка из памяти
                         if src_type == "mem":
                             instr_ex.result = self.memory[src_val]
                             if debug:
                                 print(f"[MEM @{instr_ex.addr}] MOV загрузка [{src_val}] -> {instr_ex.result}")
+                        elif src_type == "mem_reg":
+                            addr = self.registers[src_val]
+                            instr_ex.result = self.memory[addr]
+                            if debug:
+                                print(f"[MEM @{instr_ex.addr}] MOV загрузка [R{src_val}] (адрес {addr}) -> {instr_ex.result}")
+                        # Запись в память
                         elif dest_type == "mem":
                             self.memory[dest_val] = instr_ex.result
                             if debug:
                                 print(f"[MEM @{instr_ex.addr}] MOV запись [{dest_val}] <- {instr_ex.result}")
+                        elif dest_type == "mem_reg":
+                            addr = self.registers[dest_val]
+                            self.memory[addr] = instr_ex.result
+                            if debug:
+                                print(f"[MEM @{instr_ex.addr}] MOV запись [R{dest_val}] (адрес {addr}) <- {instr_ex.result}")
                     new_pipeline[3] = instr_ex
                 else:
                     # Инструкция ещё не завершила выполнение, остаётся в EX
