@@ -16,6 +16,7 @@ REG_NAMES = [f"R{i}" for i in range(NUM_REGS)]
 INSTRUCTION_SPECS = {
     "HLT": (0, []),
     "NOP": (0, []),
+    "JMP": (1, ['LABEL']),
 }
 
 # ------------------------------------------------------------
@@ -120,6 +121,12 @@ def validate_instruction(opcode: str, operands: List[str], line_num: int) -> Non
                 raise ValueError(
                     f"Line {line_num}: Operand {i+1} of {opcode}: expected memory address (integer), "
                     f"got '{operand}'"
+                )
+        elif expected_type == 'LABEL':
+            # метка может быть любым идентификатором, проверка только на пустоту
+            if not operand:
+                raise ValueError(
+                    f"Line {line_num}: Operand {i+1} of {opcode}: expected label, got empty string"
                 )
         else:
             raise ValueError(
@@ -391,6 +398,15 @@ class PipelineExecutor(BaseExecutor):
             self.ex_stage.remaining_cycles = 1
             if instr.opcode == "HLT":
                 self.halted = True
+            if instr.opcode == "JMP":
+                op = instr.operands[0]
+                try:
+                    target = int(op)
+                except ValueError:
+                    target = self.program.resolve_label(op)
+                    if target is None:
+                        raise RuntimeError(f"Undefined label '{op}' for JMP")
+                self.ex_stage.pc_target = target
 
         # Если многотактная операция, не выполняем сразу, а ждём.
         # В методе tick будем уменьшать счётчик и выполнять на последнем такте.
@@ -440,6 +456,12 @@ class PipelineExecutor(BaseExecutor):
         if self.debug and self.cycles > 0:
             self.debug_print()
 
+        # Обработка перехода (после того как стадии выполнены)
+        if self.ex_stage.pc_target is not None:
+            self.state.pc = self.ex_stage.pc_target
+            self.flush(['IF', 'ID'])
+            self.ex_stage.pc_target = None
+
         # Обновление многотактных операций в EX
         if self.ex_stage.instr and not self.ex_stage.bubble:
             if self.ex_stage.remaining_cycles > 0:
@@ -455,7 +477,7 @@ class PipelineExecutor(BaseExecutor):
         self.execute()
         self.decode()
         self.fetch()
-
+        
         self.cycles += 1
         return
 
@@ -486,6 +508,7 @@ class PipelineExecutor(BaseExecutor):
             self.tick()
             if self.cycles > MAX_CYCLES:
                 raise RuntimeError("Drain timeout")
+            self.cycles -=1
 
     def get_stats(self):
         return {
