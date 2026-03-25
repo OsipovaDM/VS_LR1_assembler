@@ -4,7 +4,7 @@ from typing import List, Dict, Optional, Tuple, Set
 # ------------------------------------------------------------
 # Конфигурация архитектуры
 # ------------------------------------------------------------
-MAX_CYCLES = 20
+MAX_CYCLES = 50
 NON_MEM_WB = ("NOP", "HLT") # Операции без доступа к памяти и записи данных
 
 NUM_REGS = 8
@@ -17,6 +17,7 @@ INSTRUCTION_SPECS = {
     "HLT": (0, []),
     "NOP": (0, []),
     "JMP": (1, ['LABEL']),
+    "MOV": (2, ['REG', 'REG']),
 }
 
 # ------------------------------------------------------------
@@ -32,13 +33,18 @@ class Instruction:
         return f"{self.opcode} {' '.join(self.operands)}"
 
     def reads(self) -> Set[str]:
-        """Возвращает множество читаемых архитектурных объектов (регистры, флаги, память)"""
-        # TODO: реализовать
+        """Возвращает множество читаемых архитектурных объектов."""
+        if self.opcode == "MOV":
+            # читается src-регистр (второй операнд)
+            return {self.operands[1]}
+        # для остальных пока пусто
         return set()
 
     def writes(self) -> Set[str]:
-        """Возвращает множество записываемых архитектурных объектов"""
-        # TODO: реализовать
+        """Возвращает множество записываемых архитектурных объектов."""
+        if self.opcode == "MOV":
+            # записывается dest-регистр (первый операнд)
+            return {self.operands[0]}
         return set()
 
 # ------------------------------------------------------------
@@ -262,7 +268,6 @@ class PipelineStage:
     """Представляет одну стадию конвейера"""
     def __init__(self):
         self.instr: Optional[Instruction] = None
-        self.bubble: bool = False  # true, если стадия содержит пузырь
         # Дополнительные поля для передачи данных между стадиями
         self.ex_result: Optional[int] = None      # результат выполнения (EX)
         self.mem_result: Optional[int] = None     # результат из памяти (MEM)
@@ -271,6 +276,7 @@ class PipelineStage:
         self.write_mem_value: Optional[int] = None
         self.remaining_cycles: int = 0            # для многотактных операций (EX)
         self.pc_target: Optional[int] = None      # целевой адрес для перехода
+
 
 class PipelineExecutor(BaseExecutor):
     def __init__(self, program: Program, state: State, debug: bool = False):
@@ -290,32 +296,28 @@ class PipelineExecutor(BaseExecutor):
         self.stall_cycles_struct = 0
         self.flush_cycles = 0
 
-        # Для обнаружения зависимостей
-        # ...
+        self.stall_pipeline = False
 
-    def stall(self, stages: List[str], reason: str):
+    def check_data_hazard(self, instr: Instruction) -> bool:
         """
-        Задержка конвейера: вставляем пузыри в указанные стадии.
-        stages: список названий стадий, которые должны быть задержаны (например ['IF','ID'])
-        reason: 'data' или 'struct' для статистики
+        Проверяет, конфликтует ли инструкция по данным с инструкциями в EX и MEM.
+        Возвращает True, если нужно stall.
         """
-        if 'IF' in stages:
-            self.if_stage.bubble = True
-        if 'ID' in stages:
-            self.id_stage.bubble = True
-        if 'EX' in stages:
-            self.ex_stage.bubble = True
-        if 'MEM' in stages:
-            self.mem_stage.bubble = True
-        if 'WB' in stages:
-            self.wb_stage.bubble = True
-        if reason == 'data':
-            self.stall_cycles_data += 1
-        elif reason == 'struct':
-            self.stall_cycles_struct += 1
+        reads = instr.reads()
+        # Конфликт с EX
+        if self.ex_stage.instr:
+            writes_ex = self.ex_stage.instr.writes()
+            if reads & writes_ex:
+                return True
+        # Конфликт с MEM
+        if self.mem_stage.instr:
+            writes_mem = self.mem_stage.instr.writes()
+            if reads & writes_mem:
+                return True
+        return False
 
     def flush(self, stages: List[str]):
-        """Очистка указанных стадий (установка bubble)"""
+        """Очистка указанных стадий"""
         if 'IF' in stages:
             self.if_stage = PipelineStage()
         if 'ID' in stages:
@@ -339,7 +341,7 @@ class PipelineExecutor(BaseExecutor):
 
     def fetch(self):
         """Стадия IF: выборка инструкции по PC"""
-        if self.if_stage.instr is not None: # что-то стремное
+        if self.if_stage.instr is not None: # stall
             return
         if self.halted:
             return
@@ -350,43 +352,38 @@ class PipelineExecutor(BaseExecutor):
             raise RuntimeError("PC out of bounds")
         instr = self.program.instructions[self.state.pc]
         self.if_stage.instr = instr
-        self.if_stage.bubble = False
         self.state.pc += 1
         return
 
     def decode(self):
         """Стадия ID: декодирование, чтение операндов, обнаружение конфликтов"""
-        # Продвижение из IF в ID
-        if self.id_stage.instr is not None:
-            # Стадия ID занята, нужно stall
-            # В реальном конвейере это будет обработано до вызова decode
-            pass
+        # Продвижение из IF в ID, если не stall
+        if self.id_stage.instr is None:
+            self.id_stage.instr = self.if_stage.instr
+            self.if_stage.instr = None
 
-        # Перемещаем инструкцию из IF в ID
-        self.id_stage = self.if_stage
-        self.if_stage = PipelineStage()
-
-        # Если ID содержит пузырь, ничего не делаем
-        if self.id_stage.bubble or self.id_stage.instr is None:
+        if self.id_stage.instr is None:
             return
 
-        # TODO: обнаружение RAW-зависимостей и структурных конфликтов
-        # Если конфликт, вызываем stall и помечаем, что инструкция не должна продвигаться
-        # Для демонстрации пока просто пропускаем
-        # ...
+        # hazard 
+        if self.check_data_hazard(self.id_stage.instr):
+            self.stall_cycles_data += 1
+            # Пузырь в EX, чтобы не продвигать инструкцию
+            self.stall_pipeline = True  
+        else:
+            self.stall_pipeline = False
         return
 
     def execute(self):
         """Стадия EX: выполнение (возможно, многотактное)"""
-        # Продвижение из ID в EX
-        if self.ex_stage.instr is not None:
-            # EX занята – нужно stall, но пока упростим: если EX занята, не продвигаем
+        # Продвижение из ID в EX, если не stall
+        if self.stall_pipeline:
             return
-
+        
         self.ex_stage = self.id_stage
         self.id_stage = PipelineStage()
 
-        if self.ex_stage.bubble or self.ex_stage.instr is None:
+        if self.ex_stage.instr is None:
             return
 
         instr = self.ex_stage.instr
@@ -398,7 +395,7 @@ class PipelineExecutor(BaseExecutor):
             self.ex_stage.remaining_cycles = 1
             if instr.opcode == "HLT":
                 self.halted = True
-            if instr.opcode == "JMP":
+            elif instr.opcode == "JMP":
                 op = instr.operands[0]
                 try:
                     target = int(op)
@@ -407,6 +404,12 @@ class PipelineExecutor(BaseExecutor):
                     if target is None:
                         raise RuntimeError(f"Undefined label '{op}' for JMP")
                 self.ex_stage.pc_target = target
+            elif instr.opcode == "MOV":
+                dest = instr.operands[0]
+                src = instr.operands[1]
+                value = self.state.read_reg(src)
+                self.ex_stage.ex_result = value
+                self.ex_stage.write_reg = dest
 
         # Если многотактная операция, не выполняем сразу, а ждём.
         # В методе tick будем уменьшать счётчик и выполнять на последнем такте.
@@ -416,9 +419,6 @@ class PipelineExecutor(BaseExecutor):
     def memory(self):
         """Стадия MEM: доступ к памяти (чтение/запись)"""
         # Продвижение из EX в MEM
-        if self.mem_stage.instr is not None:
-            # TODO
-            return
         if self.ex_stage.instr is None:
             return
         if self.ex_stage.remaining_cycles > 0:
@@ -427,7 +427,7 @@ class PipelineExecutor(BaseExecutor):
         self.mem_stage = self.ex_stage
         self.ex_stage = PipelineStage()
 
-        if self.mem_stage.bubble or self.mem_stage.instr is None:
+        if self.mem_stage.instr is None:
             return
 
         instr = self.mem_stage.instr
@@ -442,13 +442,15 @@ class PipelineExecutor(BaseExecutor):
         self.wb_stage = self.mem_stage
         self.mem_stage = PipelineStage()
 
-        if self.wb_stage.bubble or self.wb_stage.instr is None:
+        if self.wb_stage.instr is None:
             return
 
-        instr = self.wb_stage.instr
-        # TODO: записать результат в регистр, память или флаг
-        # Увеличиваем счётчик завершённых инструкций
+        if self.wb_stage.write_reg is not None:
+            # Запись в регистр
+            self.state.write_reg(self.wb_stage.write_reg, self.wb_stage.ex_result)
+
         self.instructions_committed += 1
+
         return
 
     def tick(self):
@@ -463,7 +465,7 @@ class PipelineExecutor(BaseExecutor):
             self.ex_stage.pc_target = None
 
         # Обновление многотактных операций в EX
-        if self.ex_stage.instr and not self.ex_stage.bubble:
+        if self.ex_stage.instr:
             if self.ex_stage.remaining_cycles > 0:
                 self.ex_stage.remaining_cycles -= 1
                 # Если операция завершилась, выполняем её (результат вычисляем)
@@ -483,11 +485,11 @@ class PipelineExecutor(BaseExecutor):
 
     def debug_print(self):
         print(f"Cycle {self.cycles}:")
-        print(f"  IF: {self.if_stage.instr} (bubble={self.if_stage.bubble})")
-        print(f"  ID: {self.id_stage.instr} (bubble={self.id_stage.bubble})")
-        print(f"  EX: {self.ex_stage.instr} (bubble={self.ex_stage.bubble}, rem={self.ex_stage.remaining_cycles})")
-        print(f"  MEM:{self.mem_stage.instr} (bubble={self.mem_stage.bubble})")
-        print(f"  WB: {self.wb_stage.instr} (bubble={self.wb_stage.bubble})")
+        print(f"  IF: {self.if_stage.instr}")
+        print(f"  ID: {self.id_stage.instr} (stall={self.stall_pipeline})")
+        print(f"  EX: {self.ex_stage.instr} (rem={self.ex_stage.remaining_cycles})")
+        print(f"  MEM:{self.mem_stage.instr}")
+        print(f"  WB: {self.wb_stage.instr}")
         print(f"  State: PC={self.state.pc}, Z={self.state.z}, REGS={self.state.regs}")
 
     def run(self):
