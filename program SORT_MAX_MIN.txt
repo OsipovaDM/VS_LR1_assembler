@@ -1,0 +1,45 @@
+MOV [0] 4
+MOV [1] 2
+MOV [2] 6
+MOV [3] 7
+MOV [4] 0
+
+MOV R7 5
+
+
+# Сортировка массива заданной длины пузырьком
+# Вход: R7 - длина массива,  память начиная с 0 адреса эл-ты массива
+# Выход: память с 0 адреса отстортированный массива
+    MOV R6 1
+
+    MOV R0 R7
+    SUB R0 R0 R6
+    MOV R1 0
+
+    # while i < N, i++
+DO:
+    SUB R4 R0 R1   # N >= i ?
+    JZ EXIT
+
+    MOV R2 [R1] # Чтение i эл-та
+    ADD R1 R1 R6
+    MOV R3 [R1] # Чтение i+1 эл-та
+    SUB R4 R2 R3   # i >= i+1
+    JNZ SKIP
+    MOV [R1] R2 # нЕТ - меняем местами
+    SUB R1 R1 R6
+    MOV [R1] R3
+    ADD R1 R1 R6
+SKIP:         # да. ничего не делаем
+    JMP DO
+
+EXIT:
+    SUB R0 R0 R6
+    MOV R1 0
+    CMP R1 R0
+    JZ OUT
+    JMP DO
+
+OUT:
+    HLT
+

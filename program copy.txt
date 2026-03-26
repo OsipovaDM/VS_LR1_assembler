@@ -1,5 +1,38 @@
 # В одной строке читается только одна операция/метка. Остальной ткест после воспринимается списком операндов/игнорируется
+START:
+    MOV R1 1        
+    MOV [R0] R1
+    MOV R0 [0]
+    MOV R2 R0
+    #MOV 1 1
+    CMP R0 R1
+    JZ SKIP
+    JNZ SKIP
+    NOP
+    NOP
+    JMP EXIT
+SKIP:
+    NOP
+    NOP
+    CALL PROG
+    NOP
+    NOP
+EXIT:
+    HLT
 
+
+PROG:
+    NOP
+    ADD R3 R2 R0
+    SUB R4 R0 R3
+    MUL R1 R1 R5
+    NOP
+    DIV R4 R4 R3
+    MOD R0 R5 R1
+    RETI
+
+
+    
 # Числа (только положительные)
 MOV R0 42        # OK
 MOV R1 0         # OK
