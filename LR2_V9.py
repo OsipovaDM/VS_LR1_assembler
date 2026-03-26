@@ -1,24 +1,83 @@
 import sys
-from typing import List, Dict, Optional, Tuple, Set
+from typing import List, Dict, Optional, Tuple, Set, Union
 
 # ------------------------------------------------------------
 # Конфигурация архитектуры
 # ------------------------------------------------------------
 MAX_CYCLES = 50
-NON_MEM_WB = ("NOP", "HLT") # Операции без доступа к памяти и записи данных
+NON_MEM_WB = ("NOP", "HLT")  # Операции без доступа к памяти и записи данных
 
 NUM_REGS = 8
 MEM_SIZE = 256
 REG_NAMES = [f"R{i}" for i in range(NUM_REGS)]
 
 # Спецификация инструкций: мнемоника -> (кол-во операндов, список типов операндов)
-# Типы: 'REG' - регистр R0-R7, 'IMM' - непосредственное число, 'ADDR' - прямой адрес памяти
-INSTRUCTION_SPECS = {
-    "HLT": (0, []),
-    "NOP": (0, []),
-    "JMP": (1, ['LABEL']),
-    "MOV": (2, ['REG', 'REG']),
+# Типы: 'REG' - регистр R0-R7, 'IMM' - непосредственное число, 'ADDR' - прямой адрес памяти,
+#       'MEM_REG' - [Rreg], 'LABEL' - метка, 'ANY' - любой допустимый операнд
+INSTRUCTION_VARIANTS = {
+    "HLT": [(0, [])],
+    "NOP": [(0, [])],
+    "JMP": [(1, ['LABEL'])],
+    "MOV": [
+        (2, ['REG', 'REG']),
+        (2, ['REG', 'IMM']),
+        (2, ['REG', 'MEM']),
+        (2, ['REG', 'REG_IND']),
+        (2, ['MEM', 'REG']),
+        (2, ['REG_IND', 'REG']),
+    ],
 }
+
+
+# ------------------------------------------------------------
+# Парсинг операндов
+# ------------------------------------------------------------
+def parse_operand(token: str) -> Tuple[str, Union[int, str]]:
+    """
+    Парсинг операнда.
+    Возвращает кортеж (тип, значение):
+    - ('REG', номер_регистра) для R0-R7
+    - ('IMM', число) для констант (положительные десятичные)
+    - ('MEM', адрес) для [адрес]
+    - ('REG_IND', номер_регистра) для [Rreg]
+    - ('LABEL', имя_метки) для меток
+    """
+    token = token.upper()
+    
+    # Проверка на косвенную адресацию [addr] или [Rreg]
+    if token.startswith('[') and token.endswith(']'):
+        inner = token[1:-1]
+        if inner.startswith('R') and inner[1:].isdigit():
+            reg = int(inner[1:])
+            if 0 <= reg < NUM_REGS:
+                return ('REG_IND', reg)
+            raise ValueError(f"Недопустимый регистр {inner}")
+        if inner.isdigit():
+            addr = int(inner)
+            if 0 <= addr < MEM_SIZE:
+                return ('MEM', addr)
+            raise ValueError(f"Адрес памяти {addr} вне диапазона (0-{MEM_SIZE-1})")
+        raise ValueError(f"Неверный адрес памяти: {inner}")
+
+    # Проверка на прямой регистр
+    if token.startswith('R') and token[1:].isdigit():
+        reg = int(token[1:])
+        if 0 <= reg < NUM_REGS:
+            return ('REG', reg)
+        raise ValueError(f"Недопустимый регистр {token}")
+
+    # Проверка на непосредственное число
+    if token.isdigit():
+        value = int(token)
+        if 0 <= value <= 65535:
+            return ('IMM', value)
+        raise ValueError(f"Число {value} выходит за пределы 16 бит (0-65535)")
+
+    # Всё остальное считаем меткой (идентификатор)
+    if token and token[0].isalpha():
+        return ('LABEL', token)
+    raise ValueError(f"Неверный операнд: {token}")
+
 
 # ------------------------------------------------------------
 # Класс Instruction
@@ -26,26 +85,42 @@ INSTRUCTION_SPECS = {
 class Instruction:
     def __init__(self, opcode: str, operands: List[str]):
         self.opcode = opcode.upper()
-        self.operands = operands   # список строк, например ["R1", "R2", "R3"] или ["10"]
-        self.address = None        # адрес (индекс) в программе
+        self.operands = operands  # список строк, например ["R1", "R2", "R3"] или ["10"]
+        self.address = None  # адрес (индекс) в программе
 
     def __repr__(self):
         return f"{self.opcode} {' '.join(self.operands)}"
 
-    def reads(self) -> Set[str]:
+    def reads(self) -> Set[Tuple[str, Union[int, str]]]:
         """Возвращает множество читаемых архитектурных объектов."""
         if self.opcode == "MOV":
-            # читается src-регистр (второй операнд)
-            return {self.operands[1]}
-        # для остальных пока пусто
+            src_type, src_val = parse_operand(self.operands[1])
+            if src_type == 'REG':
+                return {('REG', src_val)}
+            elif src_type == 'MEM':
+                return {('MEM', src_val)}
+            elif src_type == 'REG_IND':
+                # Читается регистр-адрес
+                return {('REG', src_val)}
+            # imm и label не читают архитектурное состояние
+        # Для остальных инструкций можно добавить позже
         return set()
 
-    def writes(self) -> Set[str]:
+    def writes(self) -> Set[Tuple[str, Union[int, str]]]:
         """Возвращает множество записываемых архитектурных объектов."""
         if self.opcode == "MOV":
-            # записывается dest-регистр (первый операнд)
-            return {self.operands[0]}
+            dest_type, dest_val = parse_operand(self.operands[0])
+            if dest_type == 'REG':
+                return {('REG', dest_val)}
+            elif dest_type == 'MEM':
+                return {('MEM', dest_val)}
+            elif dest_type == 'REG_IND':
+                # Запись в память по адресу из регистра – записывается память,
+                # но адрес зависит от регистра. Для упрощения будем считать,
+                # что запись в любую память конфликтует с любым чтением памяти.
+                return {('MEM', None)}
         return set()
+
 
 # ------------------------------------------------------------
 # Класс Program
@@ -53,7 +128,7 @@ class Instruction:
 class Program:
     def __init__(self):
         self.instructions: List[Instruction] = []
-        self.labels: Dict[str, int] = {}   # метка -> адрес инструкции
+        self.labels: Dict[str, int] = {}  # метка -> адрес инструкции
 
     def add_instruction(self, instr: Instruction) -> int:
         """Добавляет инструкцию, возвращает её адрес"""
@@ -76,68 +151,30 @@ class Program:
 # Валидация инструкции
 # ------------------------------------------------------------
 def validate_instruction(opcode: str, operands: List[str], line_num: int) -> None:
-    """Проверяет существование инструкции и соответствие операндов спецификации.
-    В случае ошибки генерирует исключение с указанием номера строки."""
-    spec = INSTRUCTION_SPECS.get(opcode)
-    if spec is None:
+    """Проверяет инструкцию: количество операндов и соответствие типам."""
+    variants = INSTRUCTION_VARIANTS.get(opcode)
+    if variants is None:
         raise ValueError(f"Line {line_num}: Unknown instruction '{opcode}'")
 
-    expected_count, expected_types = spec
-    actual_count = len(operands)
+    # Получаем типы операндов, одновременно проверяя их корректность
+    op_types = []
+    for operand in operands:
+        try:
+            typ, _ = parse_operand(operand)
+            op_types.append(typ)
+        except Exception as e:
+            raise ValueError(f"Line {line_num}: Invalid operand '{operand}': {e}")
 
-    if actual_count != expected_count:
-        raise ValueError(
-            f"Line {line_num}: Instruction {opcode} expects {expected_count} operand(s), "
-            f"got {actual_count}"
-        )
+    # Ищем подходящий вариант
+    for expected_count, expected_types in variants:
+        if len(operands) != expected_count:
+            continue
+        if all(exp == typ for exp, typ in zip(expected_types, op_types)):
+            return  # совпадение найдено
 
-    for i, (operand, expected_type) in enumerate(zip(operands, expected_types)):
-        if expected_type == 'REG':
-            # Регистр: R0..R7
-            if not (operand.startswith('R') and operand[1:].isdigit()):
-                raise ValueError(
-                    f"Line {line_num}: Operand {i+1} of {opcode}: expected register (R0-R7), "
-                    f"got '{operand}'"
-                )
-            reg_num = int(operand[1:])
-            if not (0 <= reg_num < NUM_REGS):
-                raise ValueError(
-                    f"Line {line_num}: Operand {i+1} of {opcode}: register index out of range "
-                    f"(0-{NUM_REGS-1}), got {reg_num}"
-                )
-        elif expected_type == 'IMM':
-            # Непосредственное число (целое, может быть отрицательным)
-            try:
-                int(operand)
-            except ValueError:
-                raise ValueError(
-                    f"Line {line_num}: Operand {i+1} of {opcode}: expected integer immediate, "
-                    f"got '{operand}'"
-                )
-        elif expected_type == 'ADDR':
-            # Прямой адрес памяти (неотрицательное целое)
-            try:
-                addr = int(operand)
-                if addr < 0 or addr >= MEM_SIZE:
-                    raise ValueError(
-                        f"Line {line_num}: Operand {i+1} of {opcode}: address out of range "
-                        f"[0,{MEM_SIZE-1}], got {addr}"
-                    )
-            except ValueError:
-                raise ValueError(
-                    f"Line {line_num}: Operand {i+1} of {opcode}: expected memory address (integer), "
-                    f"got '{operand}'"
-                )
-        elif expected_type == 'LABEL':
-            # метка может быть любым идентификатором, проверка только на пустоту
-            if not operand:
-                raise ValueError(
-                    f"Line {line_num}: Operand {i+1} of {opcode}: expected label, got empty string"
-                )
-        else:
-            raise ValueError(
-                f"Line {line_num}: Internal error: unknown operand type '{expected_type}' in spec for {opcode}"
-            )
+    raise ValueError(
+        f"Line {line_num}: Instruction {opcode} does not accept operands: {' '.join(operands)}"
+    )
 
 
 # ------------------------------------------------------------
@@ -191,6 +228,7 @@ def parse_program(filename: str) -> Program:
 
     return program
 
+
 # ------------------------------------------------------------
 # Состояние системы (регистры, память, флаги)
 # ------------------------------------------------------------
@@ -238,6 +276,7 @@ class State:
     def __repr__(self):
         return f"PC={self.pc} Z={self.z} REGS={self.regs} MEM={self.mem[:10]}..."  # кратко
 
+
 # ------------------------------------------------------------
 # Базовый класс исполнителя
 # ------------------------------------------------------------
@@ -255,11 +294,18 @@ class BaseExecutor:
     def get_stats(self):
         raise NotImplementedError
 
+
 # ------------------------------------------------------------
-# Последовательный исполнитель (реализован как конвейер с полной блокировкой)
+# Последовательный исполнитель (пока заглушка)
 # ------------------------------------------------------------
 class SequentialExecutor(BaseExecutor):
-    pass
+    def run(self):
+        # Для простоты можно реализовать позже, но для задания требуется только конвейер с MOV
+        pass
+
+    def get_stats(self):
+        return {}
+
 
 # ------------------------------------------------------------
 # Конвейерный исполнитель (уровень C: многотактные операции)
@@ -269,19 +315,20 @@ class PipelineStage:
     def __init__(self):
         self.instr: Optional[Instruction] = None
         # Дополнительные поля для передачи данных между стадиями
-        self.ex_result: Optional[int] = None      # результат выполнения (EX)
-        self.mem_result: Optional[int] = None     # результат из памяти (MEM)
-        self.write_reg: Optional[str] = None      # регистр назначения
-        self.write_mem_addr: Optional[int] = None # адрес памяти для записи
-        self.write_mem_value: Optional[int] = None
-        self.remaining_cycles: int = 0            # для многотактных операций (EX)
-        self.pc_target: Optional[int] = None      # целевой адрес для перехода
+        self.result: Optional[int] = None          # результат (вычисленный или из памяти)
+        self.dest_type: Optional[str] = None       # тип приёмника ('REG', 'MEM', 'REG_IND')
+        self.dest_val: Optional[Union[int, str]] = None  # номер регистра или адрес
+        self.src_type: Optional[str] = None        # тип источника ('REG', 'IMM', 'MEM', 'REG_IND')
+        self.src_val: Optional[Union[int, str]] = None   # значение источника
+        self.remaining_cycles: int = 0             # для многотактных операций (MUL/DIV)
+        self.pc_target: Optional[int] = None       # целевой адрес для перехода
+        self.extra: Dict = {}                      # дополнительные данные (типы операндов и т.п.)
 
 
 class PipelineExecutor(BaseExecutor):
     def __init__(self, program: Program, state: State, debug: bool = False):
         super().__init__(program, state, debug)
-        
+
         # Стадии
         self.if_stage = PipelineStage()
         self.id_stage = PipelineStage()
@@ -318,18 +365,12 @@ class PipelineExecutor(BaseExecutor):
 
     def flush(self, stages: List[str]):
         """Очистка указанных стадий"""
-        if 'IF' in stages:
-            self.if_stage = PipelineStage()
-        if 'ID' in stages:
-            self.id_stage = PipelineStage()
-        if 'EX' in stages:
-            self.ex_stage = PipelineStage()
-        if 'MEM' in stages:
-            self.mem_stage = PipelineStage()
-        if 'WB' in stages:
-            self.wb_stage = PipelineStage()
+        if 'IF' in stages: self.if_stage = PipelineStage()
+        if 'ID' in stages: self.id_stage = PipelineStage()
+        if 'EX' in stages: self.ex_stage = PipelineStage()
+        if 'MEM' in stages: self.mem_stage = PipelineStage()
+        if 'WB' in stages: self.wb_stage = PipelineStage()
         self.flush_cycles += 1
-
 
     def has_hlt_in_pipeline(self) -> bool:
         """Проверяет, есть ли HLT в любой стадии конвейера, кроме IF (так как IF может только что выбрать HLT)."""
@@ -337,49 +378,44 @@ class PipelineExecutor(BaseExecutor):
             (self.ex_stage.instr and self.ex_stage.instr.opcode == "HLT") or \
             (self.mem_stage.instr and self.mem_stage.instr.opcode == "HLT") or \
             (self.wb_stage.instr and self.wb_stage.instr.opcode == "HLT")
-    
 
     def fetch(self):
         """Стадия IF: выборка инструкции по PC"""
-        if self.if_stage.instr is not None: # stall
+        if self.if_stage.instr is not None:  # stall
             return
         if self.halted:
             return
         if self.state.pc < 0 or self.state.pc >= len(self.program.instructions):
             if self.has_hlt_in_pipeline():
                 return
-            # Ошибка: неверный PC
             raise RuntimeError("PC out of bounds")
         instr = self.program.instructions[self.state.pc]
         self.if_stage.instr = instr
         self.state.pc += 1
-        return
 
     def decode(self):
         """Стадия ID: декодирование, чтение операндов, обнаружение конфликтов"""
         # Продвижение из IF в ID, если не stall
         if self.id_stage.instr is None:
-            self.id_stage.instr = self.if_stage.instr
-            self.if_stage.instr = None
+            self.id_stage = self.if_stage
+            self.if_stage = PipelineStage()
 
         if self.id_stage.instr is None:
             return
 
-        # hazard 
+        # Проверка hazard
         if self.check_data_hazard(self.id_stage.instr):
             self.stall_cycles_data += 1
-            # Пузырь в EX, чтобы не продвигать инструкцию
-            self.stall_pipeline = True  
+            self.stall_pipeline = True
         else:
             self.stall_pipeline = False
-        return
 
     def execute(self):
         """Стадия EX: выполнение (возможно, многотактное)"""
         # Продвижение из ID в EX, если не stall
         if self.stall_pipeline:
             return
-        
+
         self.ex_stage = self.id_stage
         self.id_stage = PipelineStage()
 
@@ -387,38 +423,50 @@ class PipelineExecutor(BaseExecutor):
             return
 
         instr = self.ex_stage.instr
-        # Определяем количество тактов для выполнения
-        if instr.opcode in ['MUL', 'DIV']:
-            # Уровень C: умножение и деление занимают 3 такта (например)
+        opcode = instr.opcode
+
+        # Определяем количество тактов для выполнения (для MUL/DIV многотактность)
+        if opcode in ['MUL', 'DIV']:
             self.ex_stage.remaining_cycles = 3
         else:
             self.ex_stage.remaining_cycles = 1
-            if instr.opcode == "HLT":
-                self.halted = True
-            elif instr.opcode == "JMP":
-                op = instr.operands[0]
-                try:
-                    target = int(op)
-                except ValueError:
-                    target = self.program.resolve_label(op)
-                    if target is None:
-                        raise RuntimeError(f"Undefined label '{op}' for JMP")
-                self.ex_stage.pc_target = target
-            elif instr.opcode == "MOV":
-                dest = instr.operands[0]
-                src = instr.operands[1]
-                value = self.state.read_reg(src)
-                self.ex_stage.ex_result = value
-                self.ex_stage.write_reg = dest
 
-        # Если многотактная операция, не выполняем сразу, а ждём.
-        # В методе tick будем уменьшать счётчик и выполнять на последнем такте.
-        # Пока ничего не делаем, так как выполнение отложено.
-        return
+        if opcode == "HLT":
+            self.halted = True
+        elif opcode == "JMP":
+            op = instr.operands[0]
+            try:
+                target = int(op)
+            except ValueError:
+                target = self.program.resolve_label(op)
+                if target is None:
+                    raise RuntimeError(f"Undefined label '{op}' for JMP")
+            self.ex_stage.pc_target = target
+        elif opcode == "MOV":
+            dest_operand = instr.operands[0]
+            src_operand = instr.operands[1]
+            dest_type, dest_val = parse_operand(dest_operand)
+            src_type, src_val = parse_operand(src_operand)
+
+            # Сохраняем типы и значения
+            self.ex_stage.dest_type = dest_type
+            self.ex_stage.dest_val = dest_val
+            self.ex_stage.src_type = src_type
+            self.ex_stage.src_val = src_val
+
+            # Вычисляем результат, если он известен сразу
+            if src_type == 'REG':
+                self.ex_stage.result = self.state.read_reg(f"R{src_val}")
+            elif src_type == 'IMM':
+                self.ex_stage.result = src_val
+            # Для MEM и REG_IND результат будет получен на стадии MEM
+            elif src_type in ('MEM', 'REG_IND'):
+                self.ex_stage.result = None
+            else:
+                raise RuntimeError(f"MOV: unsupported source type {src_type}")
 
     def memory(self):
         """Стадия MEM: доступ к памяти (чтение/запись)"""
-        # Продвижение из EX в MEM
         if self.ex_stage.instr is None:
             return
         if self.ex_stage.remaining_cycles > 0:
@@ -431,13 +479,40 @@ class PipelineExecutor(BaseExecutor):
             return
 
         instr = self.mem_stage.instr
-        # TODO: реализовать операции с памятью (LOAD/STORE)
-        # Для примера: если инструкция LOAD, читаем из памяти и сохраняем в mem_result
-        # ...
-        return
+        if instr.opcode != "MOV":
+            return
+
+        dest_type = self.mem_stage.dest_type
+        src_type = self.mem_stage.src_type
+        dest_val = self.mem_stage.dest_val
+        src_val = self.mem_stage.src_val
+
+        # Обработка загрузки из памяти
+        if src_type == 'MEM':
+            addr = src_val
+            self.mem_stage.result = self.state.read_mem(addr)
+        elif src_type == 'REG_IND':
+            addr = self.state.read_reg(f"R{src_val}")
+            self.mem_stage.result = self.state.read_mem(addr)
+
+        # Обработка записи в память
+        if dest_type == 'MEM':
+            addr = dest_val
+            value = self.mem_stage.result
+            # Если результат ещё не вычислен (например, когда источник тоже память)
+            if value is None:
+                # В нашем случае значение для записи должно быть уже в result, иначе ошибка
+                raise RuntimeError("MOV: запись в память без значения")
+            self.state.write_mem(addr, value)
+        elif dest_type == 'REG_IND':
+            addr = self.state.read_reg(f"R{dest_val}")
+            value = self.mem_stage.result
+            if value is None:
+                raise RuntimeError("MOV: запись в память без значения")
+            self.state.write_mem(addr, value)
 
     def writeback(self):
-        """Стадия WB: запись результата в регистр/память/флаг"""
+        """Стадия WB: запись результата в регистр"""
         # Продвижение из MEM в WB
         self.wb_stage = self.mem_stage
         self.mem_stage = PipelineStage()
@@ -445,13 +520,15 @@ class PipelineExecutor(BaseExecutor):
         if self.wb_stage.instr is None:
             return
 
-        if self.wb_stage.write_reg is not None:
-            # Запись в регистр
-            self.state.write_reg(self.wb_stage.write_reg, self.wb_stage.ex_result)
+        instr = self.wb_stage.instr
+        if instr.opcode == "MOV":
+            if self.wb_stage.dest_type == 'REG':
+                value = self.wb_stage.result
+                if value is None:
+                    raise RuntimeError("MOV: result is None in WB")
+                self.state.write_reg(f"R{self.wb_stage.dest_val}", value)
 
         self.instructions_committed += 1
-
-        return
 
     def tick(self):
         """Один такт конвейера"""
@@ -470,7 +547,7 @@ class PipelineExecutor(BaseExecutor):
                 self.ex_stage.remaining_cycles -= 1
                 # Если операция завершилась, выполняем её (результат вычисляем)
                 if self.ex_stage.remaining_cycles == 0:
-                    # TODO: выполнить операцию (результат в ex_stage.ex_result)
+                    # Здесь можно добавить выполнение MUL/DIV, если потребуется
                     pass
 
         # Продвижение по стадиям (обратный порядок)
@@ -479,9 +556,8 @@ class PipelineExecutor(BaseExecutor):
         self.execute()
         self.decode()
         self.fetch()
-        
+
         self.cycles += 1
-        return
 
     def debug_print(self):
         print(f"Cycle {self.cycles}:")
@@ -510,7 +586,6 @@ class PipelineExecutor(BaseExecutor):
             self.tick()
             if self.cycles > MAX_CYCLES:
                 raise RuntimeError("Drain timeout")
-            self.cycles -=1
 
     def get_stats(self):
         return {
@@ -521,6 +596,7 @@ class PipelineExecutor(BaseExecutor):
             "stall_struct": self.stall_cycles_struct,
             "flush": self.flush_cycles,
         }
+
 
 # ------------------------------------------------------------
 # Точка входа с аргументами командной строки
@@ -574,6 +650,6 @@ def main(file: str = "program.txt", debug: bool = True, mode: str = "pipe"):
         stats = executor.get_stats()
         print(f"Stats: {stats}")
 
+
 if __name__ == "__main__":
     main()
-    
